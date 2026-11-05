@@ -1,0 +1,44 @@
+[project]
+name = "quilha-fraude"
+version = "0.1.0"
+description = "Detecção de fraude em sinistros de automóvel com priorização da fila de perícia — Quilha Seguros"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { file = "LICENSE" }
+authors = [{ name = "Flávio Henrique Barbosa" }]
+dependencies = [
+    "pandas>=2.2.3",
+    "numpy>=2.1.0",
+    "scikit-learn>=1.6.0",
+    "matplotlib>=3.9.0",
+    "seaborn>=0.13.0",
+    "jupyterlab>=4.3.0",
+    "ipykernel>=6.29.0",
+    "nbformat>=5.10.0",
+    "nbconvert>=7.16.0",
+    "jupytext>=1.16.0",
+    "shap>=0.54.1",
+    "joblib>=1.6.0",
+    "xgboost>=3.4.1",
+    "lightgbm>=4.7.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.9.0",
+]
+mlops = [
+    "mlflow>=3.18.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]

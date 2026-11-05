@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# .gitignore — Projeto Quilha Seguros / Auto Insurance Fraud
+# ---------------------------------------------------------------------------
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# ---- Jupyter ----
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# ---- Ferramentas de qualidade ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+coverage.xml
+.coverage
+htmlcov/
+
+# ---- MLOps ----
+mlruns/
+mlartifacts/
+mlflow.db
+mlflow.db-*
+
+# ---- Dados intermediários e processados (não versionados) ----
+data/interim/*
+data/processed/*
+!data/interim/.gitkeep
+!data/processed/.gitkeep
+
+# ---- Modelos treinados ----
+# O Pipeline treinado é versionado: o Streamlit Cloud clona o repositório e não
+# tem acesso a nenhum armazenamento de artefatos separado, então o app só
+# funciona se o .joblib estiver no repo. Demais arquivos de modelo ficam fora.
+# O `pipeline_fraude.versoes.json` ao lado dele NÃO é versionado: o uv.lock já
+# congela o ambiente de forma reprodutível e o registro carrega um `gerado_em`
+# que mudaria a cada re-execução do notebook, virando diff inútil.
+models/*
+!models/.gitkeep
+!models/*.joblib
+
+# ---- Segredos e ambiente ----
+.env
+.env.*
+
+# ---- Sistema operacional e IDE ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
