@@ -2,7 +2,7 @@
 
 **Projeto:** Detecção de fraude em sinistros de automóvel — Quilha Seguros
 **Fase:** 4 de 6 (CRISP-DM — Modelagem)
-**Status:** em execução (Parte 0 concluída)
+**Status:** em execução (Partes 0, 1, 2 e 3 concluídas)
 **Pré-requisito:** Fases 1 a 3 concluídas e verificadas (`docs/01_entendimento_negocio.md`,
 `docs/02_entendimento_dados.md`, `docs/03_preparacao_dados.md`)
 
@@ -314,9 +314,9 @@ sênior do que o pedido, avise e explique **antes** de executar.
 | Parte | Descrição | Status |
 |---|---|---|
 | 0 | Infraestrutura de MLOps (dependências + `mlops.py` + degradação sem credencial) | concluída |
-| 1 | Modelos e baselines, mesmo protocolo | não iniciada |
-| 2 | Protocolo de validação (Pipeline dentro do fold, `k` proporcional) | não iniciada |
-| 3 | Hiperparâmetros e desbalanceamento (31 vs 39,11) | não iniciada |
+| 1 | Modelos e baselines, mesmo protocolo | concluída |
+| 2 | Protocolo de validação (Pipeline dentro do fold, `k` proporcional) | concluída |
+| 3 | Hiperparâmetros e desbalanceamento (31 vs 39,11) | concluída |
 | 4 | UnderSample inteligente vs controle | não iniciada |
 | 5 | Campeão, função custo 31:1 e SHAP | não iniciada |
 | 6 | Integração (artefato, testes, notebook, docs) | não iniciada |

@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import average_precision_score, roc_auc_score
+
+from quilha.modelagem import (
+    CUSTO_FRAUDE_PAGA,
+    CUSTO_PERICIA,
+    PESO_BALANCEAMENTO_39,
+    PESO_CUSTO_31,
+    VALORES_CCP_ALPHA,
+    RegraAtualQuilha,
+    calcular_k_proporcional,
+    calcular_metricas_holdout,
+    construir_estimador_modelo,
+    extrair_configuracao_arvore,
+    gerar_buscas_parte3,
+    gerar_grid_ccp_alpha,
+    peso_customizado,
+    scorer_pr_auc,
+    scorer_precisao_top_k,
+    scorer_resultado_financeiro,
+    scorer_roc_auc,
+)
+
+
+def test_regra_atual_devolve_nota_monotonica_e_zero_abaixo_do_limiar() -> None:
+    X = pd.DataFrame({"valor_reclamado": [20_000.0, 50_000.0, 60_000.0, 100_000.0]})
+
+    modelo = RegraAtualQuilha().fit(X)
+    probabilidades = modelo.predict_proba(X)[:, 1]
+
+    assert probabilidades[0] == 0.0
+    assert probabilidades[1] == 0.0
+    assert 0.0 < probabilidades[2] < probabilidades[3] < 1.0
+
+
+def test_calcular_metricas_holdout_confere_resultado_manual() -> None:
+    y_true = np.array([1, 0, 1, 0, 0])
+    probabilidades = np.array([0.90, 0.80, 0.70, 0.20, 0.10])
+
+    metricas = calcular_metricas_holdout(y_true, probabilidades, k=2)
+
+    # Top-2 = indices 0 e 1 => 1 TP, 1 FP e 1 FN.
+    assert metricas["tp_900"] == 1
+    assert metricas["fp_900"] == 1
+    assert metricas["fn_900"] == 1
+    assert metricas["precisao_900"] == 0.5
+    assert metricas["cobertura_900"] == 0.5
+    assert metricas["resultado_900"] == (CUSTO_FRAUDE_PAGA * 1) - (CUSTO_PERICIA * 2)
+    assert metricas["custo_total_900"] == (CUSTO_FRAUDE_PAGA * 1) + (CUSTO_PERICIA * 1)
+
+
+def test_calcular_k_proporcional_confere_regra_do_prompt() -> None:
+    assert calcular_k_proporcional(9_619) == 720
+    assert calcular_k_proporcional(9_620) == 720
+    assert calcular_k_proporcional(11_904) == 891
+
+
+def test_scorers_da_cv_usam_k_proporcional_do_fold() -> None:
+    y_true = np.array([1, 0, 1, 0, 0, 1])
+    probabilidades = np.array([0.95, 0.90, 0.80, 0.70, 0.20, 0.10])
+
+    resultado = scorer_resultado_financeiro(y_true, probabilidades)
+    precisao = scorer_precisao_top_k(y_true, probabilidades)
+
+    # Para 6 exemplos, k proporcional = round(900 * 6 / 12024) = 0.
+    assert resultado == 0.0
+    assert precisao == 0.0
+
+
+def test_scorers_pr_auc_e_roc_auc_extraem_coluna_positiva() -> None:
+    y_true = np.array([0, 1, 0, 1])
+    probabilidades = np.array(
+        [
+            [0.9, 0.1],
+            [0.2, 0.8],
+            [0.7, 0.3],
+            [0.1, 0.9],
+        ]
+    )
+
+    assert scorer_pr_auc(y_true, probabilidades) == average_precision_score(
+        y_true, probabilidades[:, 1]
+    )
+    assert scorer_roc_auc(y_true, probabilidades) == roc_auc_score(
+        y_true, probabilidades[:, 1]
+    )
+
+
+def test_gerar_buscas_parte3_carrega_pesos_31_e_39_11() -> None:
+    buscas = gerar_buscas_parte3()
+
+    pesos_arvore = {str(config["class_weight"]) for config in buscas["decision_tree"]}
+    assert str(peso_customizado(PESO_CUSTO_31)) in pesos_arvore
+    assert str(peso_customizado(PESO_BALANCEAMENTO_39)) in pesos_arvore
+
+    pesos_xgboost = {float(config["scale_pos_weight"]) for config in buscas["xgboost"]}
+    assert PESO_CUSTO_31 in pesos_xgboost
+    assert PESO_BALANCEAMENTO_39 in pesos_xgboost
+
+
+def test_construir_estimador_modelo_aplica_parametros_customizados() -> None:
+    arvore = construir_estimador_modelo(
+        "decision_tree",
+        {"max_depth": 7, "class_weight": peso_customizado(PESO_CUSTO_31)},
+    )
+    assert arvore.max_depth == 7
+    assert arvore.class_weight == peso_customizado(PESO_CUSTO_31)
+
+
+def test_extrair_configuracao_arvore_recupera_vencedora_da_tabela() -> None:
+    tabela_busca = pd.DataFrame(
+        {
+            "familia_modelo": ["decision_tree", "decision_tree", "xgboost"],
+            "resultado_k_cv_media": [1_000.0, 2_000.0, 9_999.0],
+            "pr_auc_cv_media": [0.10, 0.20, 0.90],
+            "param_max_depth": [3.0, 9.0, 4.0],
+            "param_min_samples_leaf": [1.0, 20.0, 1.0],
+            "param_class_weight": ["None", str(peso_customizado(PESO_CUSTO_31)), "None"],
+        }
+    )
+
+    configuracao = extrair_configuracao_arvore(tabela_busca)
+
+    assert configuracao["max_depth"] == 9
+    assert configuracao["min_samples_leaf"] == 20
+    assert configuracao["class_weight"] == peso_customizado(PESO_CUSTO_31)
+
+
+def test_extrair_configuracao_arvore_trata_profundidade_none() -> None:
+    tabela_busca = pd.DataFrame(
+        {
+            "familia_modelo": ["decision_tree"],
+            "resultado_k_cv_media": [2_000.0],
+            "pr_auc_cv_media": [0.20],
+            "param_max_depth": [np.nan],
+            "param_min_samples_leaf": [5.0],
+            "param_class_weight": ["balanced"],
+        }
+    )
+
+    configuracao = extrair_configuracao_arvore(tabela_busca)
+
+    assert configuracao["max_depth"] is None
+    assert configuracao["class_weight"] == "balanced"
+
+
+def test_extrair_configuracao_arvore_trata_class_weight_ausente_vindo_de_csv() -> None:
+    tabela_busca = pd.DataFrame(
+        {
+            "familia_modelo": ["decision_tree"],
+            "resultado_k_cv_media": [2_000.0],
+            "pr_auc_cv_media": [0.20],
+            "param_max_depth": [10.0],
+            "param_min_samples_leaf": [20.0],
+            "param_class_weight": [float("nan")],
+        }
+    )
+
+    configuracao = extrair_configuracao_arvore(tabela_busca)
+
+    assert configuracao["class_weight"] is None
+    assert configuracao["max_depth"] == 10
+
+
+def test_gerar_grid_ccp_alpha_cobre_a_varredura_de_poda() -> None:
+    base = {"max_depth": 9, "min_samples_leaf": 20, "class_weight": None}
+
+    grade = gerar_grid_ccp_alpha(base)
+
+    assert len(grade) == len(VALORES_CCP_ALPHA)
+    assert all(config["ccp_alpha"] in VALORES_CCP_ALPHA for config in grade)
+    assert all(config["max_depth"] == 9 for config in grade)
+    assert grade[0]["ccp_alpha"] == 0.0
