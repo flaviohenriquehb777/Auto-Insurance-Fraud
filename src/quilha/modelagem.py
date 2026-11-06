@@ -63,6 +63,20 @@ VALORES_CCP_ALPHA: tuple[float, ...] = (
     0.01,
 )
 
+# Hiperparâmetros que são contagem e precisam voltar como `int` ao sair do CSV.
+PARAMETROS_INTEIROS: frozenset[str] = frozenset(
+    {
+        "max_depth",
+        "min_samples_leaf",
+        "min_samples_split",
+        "min_child_weight",
+        "min_child_samples",
+        "max_leaf_nodes",
+        "n_estimators",
+        "num_leaves",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ResultadoModelo:
@@ -1025,3 +1039,133 @@ def rodar_protocolo_validacao(seed: int = SEED) -> pd.DataFrame:
         by=["resultado_k_cv_media", "pr_auc_cv_media", "resultado_900_holdout"],
         ascending=[False, False, False],
     ).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Publicação do essencial da Parte 3 no MLflow remoto
+# ---------------------------------------------------------------------------
+
+
+def reconstruir_parametros_vencedor(linha: pd.Series) -> dict:
+    """Recupera os hiperparâmetros de uma família vencedora a partir da tabela.
+
+    A tabela de vencedores guarda os hiperparâmetros já expandidos em colunas
+    `param_*`; aqui eles voltam ao dicionário que o estimador espera.
+
+    Cuidado obrigatório: ao ler o CSV, o pandas transforma em `float` toda coluna
+    que tenha valor ausente — `max_depth=10` volta como `10.0`, e o sklearn
+    rejeita com `InvalidParameterError`. Por isso os parâmetros de contagem
+    (`PARAMETROS_INTEIROS`) são convertidos de volta para `int`.
+    """
+    parametros: dict = {}
+    for coluna, valor in linha.items():
+        if not coluna.startswith("param_"):
+            continue
+        nome = coluna.removeprefix("param_")
+        convertido = _desserializar_parametro_expandido(valor)
+        if convertido is None:
+            continue
+        if nome in PARAMETROS_INTEIROS and isinstance(convertido, float):
+            convertido = int(convertido)
+        parametros[nome] = convertido
+    return parametros
+
+
+def publicar_essencial_parte3(
+    tabela_vencedores: pd.DataFrame,
+    tabela_busca: pd.DataFrame,
+    tabela_poda: pd.DataFrame,
+    seed: int = SEED,
+) -> pd.DataFrame:
+    """Publica no MLflow apenas o essencial da Parte 3, sem repetir a busca inteira.
+
+    Motivo: espelhar as 372 configurações run a run se mostrou inviável — a
+    latência de rede degradou de ~21 s para ~206 s por configuração. A busca
+    segue local (é determinística) e sobem só as **quatro famílias vencedoras**,
+    com CV e holdout recalculados no mesmo protocolo, mais um run consolidado
+    com as tabelas.
+
+    Devolve o que foi recalculado, para conferência contra a tabela local.
+    """
+    X_treino, y_treino, X_teste, y_teste = carregar_treino_teste()
+    conferencia: list[dict] = []
+
+    for _, linha in tabela_vencedores.iterrows():
+        familia = str(linha["familia_modelo"])
+        parametros = reconstruir_parametros_vencedor(linha)
+        estimador = construir_estimador_modelo(familia, parametros, seed=seed)
+
+        tabela_folds, _ = executar_validacao_cruzada(
+            estimador=clone(estimador),
+            X_treino=X_treino,
+            y_treino=y_treino,
+            seed=seed,
+            return_estimator=False,
+        )
+        resumo_cv = resumir_validacao_cruzada(tabela_folds)
+
+        pipeline = construir_pipeline(modelo=clone(estimador))
+        with contexto_run(
+            nome=nome_run(familia, "parte3_vencedor", seed),
+            parametros={
+                "familia_modelo": familia,
+                "papel_modelo": "vencedor da família na busca local da Parte 3",
+                "iteracao_busca": int(linha["iteracao"]),
+                "origem_pesos": str(linha["origem_pesos"]),
+                "seed": seed,
+                "n_splits_cv": N_SPLITS_CV,
+                "k_fold": int(resumo_cv["k_fold"]),
+                "capacidade_mensal": CAPACIDADE_MENSAL,
+                "sinistros_por_mes": SINISTROS_POR_MES,
+                "custo_pericia": CUSTO_PERICIA,
+                "custo_fraude_paga": CUSTO_FRAUDE_PAGA,
+                "features": list(FEATURES),
+                **parametros,
+            },
+            tags={
+                "fase": "4",
+                "parte": "3",
+                "modelo": familia,
+                "papel": "vencedor_familia",
+                "origem": "busca_local",
+            },
+        ) as registro:
+            registro.log_json(tabela_folds.to_dict(orient="records"), "tabela_cv.json")
+            registro.log_json(
+                {"total_configuracoes_busca": int(len(tabela_busca))},
+                "contexto_busca.json",
+            )
+            registro.log_metricas(resumo_cv, prefixo="cv_")
+            pipeline.fit(X_treino, y_treino)
+            probabilidades = pipeline.predict_proba(X_teste)[:, 1]
+            metricas_holdout = calcular_metricas_holdout(y_teste, probabilidades)
+            registro.log_metricas(metricas_holdout, prefixo="holdout_")
+            registro.log_json(metricas_holdout, "metricas_holdout.json")
+            registro.log_pipeline(pipeline, X_treino.head(1))
+
+        conferencia.append(
+            {
+                "familia_modelo": familia,
+                "resultado_k_cv_media_tabela": float(linha["resultado_k_cv_media"]),
+                "resultado_k_cv_media_recalculado": float(resumo_cv["resultado_k_cv_media"]),
+                "resultado_900_holdout_tabela": float(linha["resultado_900_holdout"]),
+                "resultado_900_holdout_recalculado": float(metricas_holdout["resultado_900"]),
+            }
+        )
+
+    with contexto_run(
+        nome=nome_run("consolidado", "parte3_tabelas", seed),
+        parametros={
+            "seed": seed,
+            "n_configuracoes_busca": int(len(tabela_busca)),
+            "n_configuracoes_poda": int(len(tabela_poda)),
+            "n_splits_cv": N_SPLITS_CV,
+            "capacidade_mensal": CAPACIDADE_MENSAL,
+        },
+        tags={"fase": "4", "parte": "3", "papel": "consolidado"},
+    ) as registro:
+        registro.log_json(tabela_vencedores.to_dict(orient="records"), "vencedores_familia.json")
+        registro.log_json(tabela_busca.to_dict(orient="records"), "busca_completa.json")
+        registro.log_json(tabela_poda.to_dict(orient="records"), "poda_ccp_alpha.json")
+
+    return pd.DataFrame(conferencia)

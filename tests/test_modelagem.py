@@ -18,6 +18,7 @@ from quilha.modelagem import (
     gerar_buscas_parte3,
     gerar_grid_ccp_alpha,
     peso_customizado,
+    reconstruir_parametros_vencedor,
     scorer_pr_auc,
     scorer_precisao_top_k,
     scorer_resultado_financeiro,
@@ -174,3 +175,43 @@ def test_gerar_grid_ccp_alpha_cobre_a_varredura_de_poda() -> None:
     assert all(config["ccp_alpha"] in VALORES_CCP_ALPHA for config in grade)
     assert all(config["max_depth"] == 9 for config in grade)
     assert grade[0]["ccp_alpha"] == 0.0
+
+
+def test_reconstruir_parametros_vencedor_devolve_contagem_como_int() -> None:
+    """O CSV devolve `10.0`; o sklearn exige `int` em `max_depth` e `n_estimators`."""
+    linha = pd.Series(
+        {
+            "familia_modelo": "xgboost",
+            "param_max_depth": 4.0,
+            "param_n_estimators": 350.0,
+            "param_learning_rate": 0.03,
+            "param_subsample": 0.85,
+            "param_scale_pos_weight": 1.0,
+        }
+    )
+
+    parametros = reconstruir_parametros_vencedor(linha)
+
+    assert parametros["max_depth"] == 4
+    assert isinstance(parametros["max_depth"], int)
+    assert parametros["n_estimators"] == 350
+    assert isinstance(parametros["n_estimators"], int)
+    assert parametros["learning_rate"] == 0.03
+    assert parametros["subsample"] == 0.85
+    assert "familia_modelo" not in parametros
+
+
+def test_reconstruir_parametros_vencedor_descarta_ausentes_e_le_peso_do_csv() -> None:
+    linha = pd.Series(
+        {
+            "param_max_depth": float("nan"),
+            "param_min_samples_leaf": 20.0,
+            "param_class_weight": str(peso_customizado(PESO_CUSTO_31)),
+        }
+    )
+
+    parametros = reconstruir_parametros_vencedor(linha)
+
+    assert "max_depth" not in parametros
+    assert parametros["min_samples_leaf"] == 20
+    assert parametros["class_weight"] == peso_customizado(PESO_CUSTO_31)
