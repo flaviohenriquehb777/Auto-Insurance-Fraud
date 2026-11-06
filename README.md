@@ -1,3 +1,7 @@
-# <img width="7822" height="2268" alt="image" src="https://github.com/user-attachments/assets/75c9d9fc-e665-4058-8566-b4e2eb4179c4" />
+<h1 align="center">Detecção de Fraudes em Sinistros de Seguros Automóveis</h1>
+
+<p align="center">
+  <strong>Quilha Seguros</strong> — priorização da fila de perícia com Machine Learning
+</p>
 
 Modelo de Machine Learning para detecção de fraudes em sinistros de seguros automóveis destinados a pessoas singulares.
