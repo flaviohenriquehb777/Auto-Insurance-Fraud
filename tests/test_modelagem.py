@@ -3,10 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score, roc_auc_score
+from xgboost import XGBClassifier
 
+from quilha.dados import carregar_base_crua
 from quilha.modelagem import (
     CUSTO_FRAUDE_PAGA,
     CUSTO_PERICIA,
+    LIMIAR_CORTE_TEORICO,
     PESO_BALANCEAMENTO_39,
     PESO_CUSTO_31,
     VALORES_CCP_ALPHA,
@@ -24,6 +27,7 @@ from quilha.modelagem import (
     scorer_resultado_financeiro,
     scorer_roc_auc,
 )
+from quilha.pipeline import CAMINHO_PIPELINE, carregar_pipeline, salvar_pipeline
 
 
 def test_regra_atual_devolve_nota_monotonica_e_zero_abaixo_do_limiar() -> None:
@@ -69,6 +73,40 @@ def test_scorers_da_cv_usam_k_proporcional_do_fold() -> None:
     # Para 6 exemplos, k proporcional = round(900 * 6 / 12024) = 0.
     assert resultado == 0.0
     assert precisao == 0.0
+
+
+def test_scorer_financeiro_confere_conta_manual_em_k_mensal() -> None:
+    quantidade = 12_024
+    y_true = np.zeros(quantidade, dtype=int)
+    y_true[:40] = 1
+    probabilidades = np.linspace(1.0, 0.0, quantidade)
+
+    resultado = scorer_resultado_financeiro(y_true, probabilidades)
+
+    assert resultado == (21_700 * 40) - (700 * 900)
+
+
+def test_corte_teorico_corresponde_a_3_2258_por_cento() -> None:
+    assert LIMIAR_CORTE_TEORICO == CUSTO_PERICIA / CUSTO_FRAUDE_PAGA
+    assert round(LIMIAR_CORTE_TEORICO * 100, 4) == 3.2258
+
+
+def test_artefato_campeao_preserva_predicoes_ao_salvar_e_recarregar(
+    tmp_path,
+) -> None:
+    """O Pipeline do aplicativo deve ser o XGBoost campeão e serializar sem drift."""
+    pipeline = carregar_pipeline(CAMINHO_PIPELINE)
+    assert isinstance(pipeline.named_steps["modelo"], XGBClassifier)
+
+    base = carregar_base_crua()
+    X = base.drop(columns=["fraude", "valor_indenizado"]).head(32)
+    probabilidades_memoria = pipeline.predict_proba(X)
+
+    caminho = salvar_pipeline(pipeline, tmp_path / "pipeline_fraude.joblib")
+    recarregado = carregar_pipeline(caminho)
+    probabilidades_disco = recarregado.predict_proba(X)
+
+    np.testing.assert_allclose(probabilidades_disco, probabilidades_memoria, rtol=0, atol=1e-12)
 
 
 def test_scorers_pr_auc_e_roc_auc_extraem_coluna_positiva() -> None:

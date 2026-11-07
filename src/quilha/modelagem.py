@@ -1,15 +1,15 @@
-"""Modelagem da Fase 4: baselines, validação e métricas de negócio.
+"""Modelagem da Fase 4: validação, seleção financeira e explicabilidade.
 
-Esta primeira camada da Fase 4 resolve a Parte 1 do prompt:
+Este módulo reúne as rotinas das Partes 1 a 5 do prompt:
 
-* define os 6 modelos da comparação inicial;
-* implementa a Regra Atual da Quilha como estimador compatível com scikit-learn;
-* roda todos pelo mesmo protocolo sobre o holdout temporal;
-* aplica a validação cruzada oficial da fase, sem vazamento;
-* registra métricas e o Pipeline inteiro no MLflow.
+* compara seis baselines com o mesmo protocolo temporal e validação cruzada;
+* ajusta hiperparâmetros e testa pesos de classe e estratégias de subamostragem;
+* seleciona o campeão por Resultado Líquido@900 e mede robustez em cinco sementes;
+* decompõe a função de custo 31:1 e gera explicações SHAP globais e locais;
+* registra os Pipelines completos no MLflow para integração com o aplicativo.
 
-As etapas de CV, busca de hiperparâmetros, under-sampling e campeão entram nas
-partes seguintes da fase e serão construídas por cima deste módulo.
+O ajuste de qualquer estimador ocorre apenas sobre os dados de treino ou dentro
+dos folds de validação. O holdout temporal é reservado para a avaliação final.
 """
 
 from __future__ import annotations

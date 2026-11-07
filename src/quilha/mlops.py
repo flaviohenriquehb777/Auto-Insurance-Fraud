@@ -113,7 +113,7 @@ def configurar_tracking() -> tuple[str, bool]:
     uri = f"sqlite:///{ARQUIVO_TRACKING_LOCAL.as_posix()}"
     _avisar(
         "Credenciais do MLflow ausentes (MLFLOW_TRACKING_URI/USERNAME/PASSWORD): "
-        f"gravando as runs localmente em `{ARQUIVO_TRACKING_LOCAL}`. "
+        "gravando as runs localmente em `mlflow.db`, na raiz do projeto. "
         "O treino segue normalmente."
     )
     return uri, True
@@ -227,6 +227,8 @@ class Registro:
         # `models:/<id>`, que funciona também no DagsHub — lá o `runs:/<id>/pipeline` não
         # resolve, porque o modelo mora como LoggedModel e não como artefato da run.
         self.model_id = getattr(info, "model_id", None)
+        if self.model_id:
+            return f"models:/{self.model_id}"
         return f"runs:/{self.run_id}/pipeline"
 
     def registrar_modelo(
