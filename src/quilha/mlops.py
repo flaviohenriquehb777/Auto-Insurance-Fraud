@@ -113,7 +113,7 @@ def configurar_tracking() -> tuple[str, bool]:
     uri = f"sqlite:///{ARQUIVO_TRACKING_LOCAL.as_posix()}"
     _avisar(
         "Credenciais do MLflow ausentes (MLFLOW_TRACKING_URI/USERNAME/PASSWORD): "
-        f"gravando as runs localmente em `{ARQUIVO_TRACKING_LOCAL}`. "
+        "gravando as runs localmente em `mlflow.db`, na raiz do projeto. "
         "O treino segue normalmente."
     )
     return uri, True
@@ -170,6 +170,7 @@ class Registro:
     run_id: str | None = None
     mlflow: Any | None = None
     motivo: str | None = None
+    model_id: str | None = None
 
     def log_parametros(self, parametros: dict) -> None:
         if self.ativa:
@@ -215,13 +216,19 @@ class Registro:
         from mlflow.models import infer_signature
 
         assinatura = infer_signature(exemplo_cru, pipeline.predict_proba(exemplo_cru)[:, 1])
-        self.mlflow.sklearn.log_model(
+        info = self.mlflow.sklearn.log_model(
             sk_model=pipeline,
             name="pipeline",
             signature=assinatura,
             input_example=exemplo_cru,
             serialization_format="cloudpickle",
         )
+        # O MLflow 3 devolve um `ModelInfo`; o `model_id` permite registrar o modelo por
+        # `models:/<id>`, que funciona também no DagsHub — lá o `runs:/<id>/pipeline` não
+        # resolve, porque o modelo mora como LoggedModel e não como artefato da run.
+        self.model_id = getattr(info, "model_id", None)
+        if self.model_id:
+            return f"models:/{self.model_id}"
         return f"runs:/{self.run_id}/pipeline"
 
     def registrar_modelo(
@@ -239,8 +246,22 @@ class Registro:
         """
         if not self.ativa:
             return None
+
+        # `models:/<id>` primeiro, porque é o que funciona no DagsHub; `runs:/.../pipeline`
+        # fica como reserva para backends que resolvem o modelo pelo artefato da run.
+        alvos = [f"runs:/{self.run_id}/pipeline"]
+        if self.model_id:
+            alvos.insert(0, f"models:/{self.model_id}")
+
         try:
-            versao = self.mlflow.register_model(f"runs:/{self.run_id}/pipeline", nome_registrado)
+            versao = None
+            for alvo in alvos:
+                try:
+                    versao = self.mlflow.register_model(alvo, nome_registrado)
+                    break
+                except Exception:  # noqa: BLE001 - cai para o próximo alvo de registro
+                    if alvo == alvos[-1]:
+                        raise
             cliente = self.mlflow.MlflowClient()
             if descricao:
                 cliente.update_model_version(nome_registrado, versao.version, description=descricao)

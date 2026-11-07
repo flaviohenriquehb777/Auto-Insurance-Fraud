@@ -108,6 +108,37 @@ def _dados_transformados(pipeline: Pipeline, df: pd.DataFrame) -> pd.DataFrame:
     return matriz
 
 
+def _amostrar_fundo(fundo: pd.DataFrame, n_fundo: int, semente: int) -> pd.DataFrame:
+    """Recorta o fundo do SHAP; ele é a referência contra a qual a contribuição é medida."""
+    fundo_df = fundo if isinstance(fundo, pd.DataFrame) else pd.DataFrame(fundo)
+    if len(fundo_df) > n_fundo:
+        fundo_df = fundo_df.sample(n=n_fundo, random_state=semente)
+    return fundo_df
+
+
+def _extrair_classe_positiva(valores):
+    """Fica com a coluna da classe 1 (fraude) de qualquer saída do SHAP.
+
+    `predict_proba` devolve duas colunas; o SHAP pode entregar um vetor `(n, m)`,
+    um arranjo `(n, m, 2)` ou uma lista por classe. Em todos os casos, o que
+    interessa é a contribuição para a probabilidade de fraude.
+    """
+    if isinstance(valores, list):
+        return np.asarray(valores[1])
+    valores = np.asarray(valores)
+    if valores.ndim == 3:
+        return valores[:, :, 1]
+    return valores
+
+
+def _montar_explicador(pipeline: Pipeline, x_fundo: pd.DataFrame):
+    """Cria o explicador model-agnóstico uma única vez, para reúso em lote."""
+    import shap
+
+    modelo = pipeline[-1]
+    return shap.Explainer(modelo.predict_proba, shap.maskers.Independent(x_fundo.to_numpy()))
+
+
 def explicar_sinistro(
     pipeline: Pipeline,
     linha: pd.DataFrame,
@@ -126,26 +157,38 @@ def explicar_sinistro(
     Modelo-agnóstico de propósito: usa `shap.Explainer` sobre `predict_proba`, então
     funciona igual com o placeholder da Fase 3 e com o modelo real da Fase 4.
     """
-    import shap
-
     linha_df = linha if isinstance(linha, pd.DataFrame) else pd.DataFrame([linha])
     linha_df = linha_df.head(1)
-    fundo_df = fundo if isinstance(fundo, pd.DataFrame) else pd.DataFrame(fundo)
-    if len(fundo_df) > n_fundo:
-        fundo_df = fundo_df.sample(n=n_fundo, random_state=semente)
 
     x_linha = _dados_transformados(pipeline, linha_df)
-    x_fundo = _dados_transformados(pipeline, fundo_df)
+    x_fundo = _dados_transformados(pipeline, _amostrar_fundo(fundo, n_fundo, semente))
 
-    modelo = pipeline[-1]
-    explicador = shap.Explainer(modelo.predict_proba, shap.maskers.Independent(x_fundo.to_numpy()))
-    valores = explicador(x_linha.to_numpy()).values
-
-    # `predict_proba` tem duas saídas (legítimo, fraude): fica a classe 1 (fraude).
-    if valores.ndim == 3:
-        valores = valores[:, :, 1]
-    elif isinstance(valores, list):
-        valores = valores[1]
+    explicador = _montar_explicador(pipeline, x_fundo)
+    valores = _extrair_classe_positiva(explicador(x_linha.to_numpy()).values)
 
     agregado = agregar_contribuicoes(valores, list(x_linha.columns), features_originais)
     return agregado.iloc[0].sort_values(ascending=False)
+
+
+def contribuicoes_agregadas(
+    pipeline: Pipeline,
+    fundo: pd.DataFrame,
+    amostra: pd.DataFrame,
+    features_originais: tuple[str, ...] | list[str] = FEATURES,
+    n_fundo: int = 100,
+    semente: int = 42,
+) -> pd.DataFrame:
+    """SHAP de **várias linhas** de uma vez, já agregado por feature original.
+
+    Mesma mecânica de `explicar_sinistro`, com o explicador criado uma única vez —
+    é o que torna viável resumir a importância do campeão sobre uma amostra da fila.
+    Devolve uma linha por sinistro e uma coluna por feature original.
+    """
+    amostra_df = amostra if isinstance(amostra, pd.DataFrame) else pd.DataFrame(amostra)
+    x_amostra = _dados_transformados(pipeline, amostra_df)
+    x_fundo = _dados_transformados(pipeline, _amostrar_fundo(fundo, n_fundo, semente))
+
+    explicador = _montar_explicador(pipeline, x_fundo)
+    valores = _extrair_classe_positiva(explicador(x_amostra.to_numpy()).values)
+
+    return agregar_contribuicoes(valores, list(x_amostra.columns), features_originais)

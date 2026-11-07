@@ -1,0 +1,4 @@
+modelo,brier,n_acima_do_limiar
+campeao (sem calibracao),0.014702404849231243,1660
+campeao + isotonic,0.01468790568394237,1654
+campeao + sigmoid,0.015209581438988425,424

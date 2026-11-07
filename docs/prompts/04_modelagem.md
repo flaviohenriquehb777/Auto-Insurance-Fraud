@@ -2,7 +2,7 @@
 
 **Projeto:** Detecção de fraude em sinistros de automóvel — Quilha Seguros
 **Fase:** 4 de 6 (CRISP-DM — Modelagem)
-**Status:** em execução (Parte 0 concluída)
+**Status:** concluída (Partes 0 a 6 executadas; evidências em `docs/04_modelagem.md`)
 **Pré-requisito:** Fases 1 a 3 concluídas e verificadas (`docs/01_entendimento_negocio.md`,
 `docs/02_entendimento_dados.md`, `docs/03_preparacao_dados.md`)
 
@@ -30,8 +30,8 @@ já fechadas nas fases anteriores.
 `FEATURES` com 18 features), `quilha.pipeline` (`construir_pipeline(modelo=...)`,
 `salvar_pipeline`, `carregar_pipeline`, `versoes`, `CAMINHO_PIPELINE`) e `quilha.explicacao`
 (`mapear_features`, `agregar_contribuicoes`, `explicar_sinistro`). O `Pipeline` é
-`preparo → imputacao → modelo`, com `set_output(transform="pandas")`, e hoje carrega um
-`DummyClassifier` de placeholder.
+`preparo → imputacao → modelo`, com `set_output(transform="pandas")`; o artefato versionado
+agora contém o XGBoost campeão. `DummyClassifier` permanece somente como baseline.
 
 **Insumos econômicos e operacionais (fixos):**
 
@@ -314,9 +314,15 @@ sênior do que o pedido, avise e explique **antes** de executar.
 | Parte | Descrição | Status |
 |---|---|---|
 | 0 | Infraestrutura de MLOps (dependências + `mlops.py` + degradação sem credencial) | concluída |
-| 1 | Modelos e baselines, mesmo protocolo | não iniciada |
-| 2 | Protocolo de validação (Pipeline dentro do fold, `k` proporcional) | não iniciada |
-| 3 | Hiperparâmetros e desbalanceamento (31 vs 39,11) | não iniciada |
-| 4 | UnderSample inteligente vs controle | não iniciada |
-| 5 | Campeão, função custo 31:1 e SHAP | não iniciada |
-| 6 | Integração (artefato, testes, notebook, docs) | não iniciada |
+| 1 | Modelos e baselines, mesmo protocolo | concluída |
+| 2 | Protocolo de validação (Pipeline dentro do fold, `k` proporcional) | concluída |
+| 3 | Hiperparâmetros e desbalanceamento (31 vs 39,11) | concluída |
+| 4 | UnderSample inteligente vs controle | concluída |
+| 5 | Campeão, função custo 31:1 e SHAP | concluída |
+| 6 | Integração (artefato, testes, notebook, docs) | concluída |
+
+**Evidência final (2026-11-07):** notebook executado sem credenciais, fallback local
+em `mlflow.db`, Pipeline XGBoost salvo (449.791 bytes), paridade de predição antes/depois
+da recarga (diferença máxima `0`), `ruff check src tests` verde e `50 passed` no pytest.
+A CV histórica da Regra Atual foi revalidada em cinco folds de treino (`k=720`) e incluída
+na tabela comparativa dos seis modelos.

@@ -84,14 +84,25 @@ CAMINHO_PIPELINE: Path = PASTA_MODELOS / NOME_ARQUIVO_PIPELINE
 # ---------------------------------------------------------------------------
 # Construção do Pipeline
 # ---------------------------------------------------------------------------
-def construir_pipeline(modelo=None) -> Pipeline:
+def construir_pipeline(
+    modelo=None,
+    colunas_excluidas: tuple[str, ...] = (),
+) -> Pipeline:
     """Monta o Pipeline serializável. `modelo=None` usa o placeholder da Fase 3.
 
     O placeholder (`DummyClassifier`) existe só para provar que o Pipeline roda de
     ponta a ponta; ele não aprende nada. O modelo de verdade entra na Fase 4.
+
+    `colunas_excluidas` serve à ablação da Parte 5: as features citadas deixam de ser
+    selecionadas pelo `ColumnTransformer` (o `preparo` continua criando-as, mas elas
+    não chegam ao modelo). Com a tupla vazia — o padrão do app — nada muda.
     """
     if modelo is None:
         modelo = DummyClassifier(strategy="prior")
+
+    excluidas = set(colunas_excluidas)
+    numericas = [c for c in COLUNAS_RAMA_NUMERICA if c not in excluidas]
+    categoricas = [c for c in COLUNAS_CATEGORICAS if c not in excluidas]
 
     rama_numerica = SimpleImputer(strategy="median", add_indicator=True)
     rama_categorica = Pipeline(
@@ -103,8 +114,8 @@ def construir_pipeline(modelo=None) -> Pipeline:
 
     imputacao = ColumnTransformer(
         [
-            ("numericas", rama_numerica, list(COLUNAS_RAMA_NUMERICA)),
-            ("categoricas", rama_categorica, list(COLUNAS_CATEGORICAS)),
+            ("numericas", rama_numerica, numericas),
+            ("categoricas", rama_categorica, categoricas),
         ]
     )
 
