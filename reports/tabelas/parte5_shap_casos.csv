@@ -1,0 +1,4 @@
+caso,indice_holdout,probabilidade,fraude_real,top_features,narrativa
+fraude_pega,11273,0.9560838341712952,1,"razao_reclamado_fipe, tipo_sinistro, faixa_valor_reclamado",Periciado no corte de 900 e confirmado como fraude (probabilidade 0.9561). Sinais que mais empurraram a decisão: razao_reclamado_fipe +0.1689; tipo_sinistro +0.1651; faixa_valor_reclamado +0.1577.
+fraude_perdida,2480,0.06063593551516533,1,"dias_de_apolice, boletim_ocorrencia, razao_reclamado_fipe",Fraude real que ficou fora das 900 perícias (probabilidade 0.0606). Sinais que mais empurraram a decisão: dias_de_apolice +0.0485; boletim_ocorrencia +0.0238; razao_reclamado_fipe +0.0140.
+legitimo_topo,8809,0.8780088424682617,0,"dias_de_apolice, faixa_valor_reclamado, tipo_sinistro",Sinistro legítimo que entrou na fila e consumiu perícia (probabilidade 0.8780). Sinais que mais empurraram a decisão: dias_de_apolice +0.3159; faixa_valor_reclamado +0.1660; tipo_sinistro +0.1351.

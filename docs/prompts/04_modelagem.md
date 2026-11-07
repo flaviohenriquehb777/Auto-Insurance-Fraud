@@ -317,6 +317,6 @@ sênior do que o pedido, avise e explique **antes** de executar.
 | 1 | Modelos e baselines, mesmo protocolo | concluída |
 | 2 | Protocolo de validação (Pipeline dentro do fold, `k` proporcional) | concluída |
 | 3 | Hiperparâmetros e desbalanceamento (31 vs 39,11) | concluída |
-| 4 | UnderSample inteligente vs controle | não iniciada |
-| 5 | Campeão, função custo 31:1 e SHAP | não iniciada |
+| 4 | UnderSample inteligente vs controle | concluída |
+| 5 | Campeão, função custo 31:1 e SHAP | concluída |
 | 6 | Integração (artefato, testes, notebook, docs) | não iniciada |

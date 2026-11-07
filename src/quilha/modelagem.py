@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.base import BaseEstimator, ClassifierMixin, clone
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import average_precision_score, brier_score_loss, make_scorer, roc_auc_score
@@ -31,10 +33,17 @@ from sklearn.model_selection import (
     StratifiedKFold,
     cross_validate,
 )
+from sklearn.pipeline import Pipeline
 from sklearn.tree import DecisionTreeClassifier
 from xgboost import XGBClassifier
 
-from quilha.dados import PASTA_FIGURAS, carregar_base_crua, dividir_temporal
+from quilha.amostragem import (
+    EstrategiaAmostragem,
+    ModeloComSubamostragem,
+    estrategias_parte4,
+)
+from quilha.dados import PASTA_FIGURAS, RAIZ_PROJETO, carregar_base_crua, dividir_temporal
+from quilha.explicacao import contribuicoes_agregadas, explicar_sinistro
 from quilha.mlops import contexto_run, nome_run
 from quilha.pipeline import construir_pipeline
 from quilha.preparacao import FEATURES
@@ -1169,3 +1178,947 @@ def publicar_essencial_parte3(
         registro.log_json(tabela_poda.to_dict(orient="records"), "poda_ccp_alpha.json")
 
     return pd.DataFrame(conferencia)
+
+
+# ---------------------------------------------------------------------------
+# Parte 4 — undersampling controlado
+# ---------------------------------------------------------------------------
+
+PASTA_TABELAS: Path = RAIZ_PROJETO / "reports" / "tabelas"
+ARQUIVO_VENCEDORES_PARTE3 = "parte3_vencedores_familia.csv"
+ARQUIVO_BUSCA_PARTE3 = "parte3_busca_completa.csv"
+ARQUIVO_PODA_PARTE3 = "parte3_poda_ccp_alpha.csv"
+
+
+@dataclass(frozen=True)
+class ResultadoAmostragem:
+    """Resultado de uma estratégia de amostragem para uma família vencedora."""
+
+    familia_modelo: str
+    estrategia: str
+    descricao_estrategia: str
+    proporcao_treino: float
+    k_fold: int
+    pr_auc_cv_media: float
+    pr_auc_cv_desvio: float
+    roc_auc_cv_media: float
+    roc_auc_cv_desvio: float
+    precisao_k_cv_media: float
+    resultado_k_cv_media: float
+    resultado_k_cv_desvio: float
+    pr_auc_holdout: float
+    roc_auc_holdout: float
+    brier_holdout: float
+    precisao_900_holdout: float
+    cobertura_900_holdout: float
+    resultado_900_holdout: float
+    tp_900_holdout: int
+    fp_900_holdout: int
+    fn_900_holdout: int
+    run_id: str | None
+
+
+def carregar_tabela_parte3(nome_arquivo: str) -> pd.DataFrame:
+    """Lê uma tabela consolidada da Parte 3 guardada em `reports/tabelas`.
+
+    As tabelas ficam versionadas no repositório para que a Parte 4 e a Parte 5 não
+    dependam de pasta temporária nem exijam refazer a busca de 34 minutos.
+    """
+    caminho = PASTA_TABELAS / nome_arquivo
+    if not caminho.exists():
+        raise FileNotFoundError(
+            f"Tabela da Parte 3 ausente: {caminho}. Rode a Parte 3 antes da Parte 4."
+        )
+    return pd.read_csv(caminho)
+
+
+def avaliar_estrategia_amostragem(
+    familia_modelo: str,
+    parametros_modelo: dict,
+    estrategia: EstrategiaAmostragem,
+    X_treino: pd.DataFrame,
+    y_treino: pd.Series,
+    X_teste: pd.DataFrame,
+    y_teste: pd.Series,
+    seed: int = SEED,
+) -> ResultadoAmostragem:
+    """Avalia uma estratégia de amostragem com a CV oficial e o holdout temporal.
+
+    A reamostragem ocorre dentro do `fit` de cada fold (ver `quilha.amostragem`),
+    então o holdout nunca é tocado — é o mesmo protocolo da Parte 3.
+    """
+    interno = construir_estimador_modelo(
+        familia_modelo=familia_modelo,
+        parametros_modelo=parametros_modelo,
+        seed=seed,
+    )
+    estimador = ModeloComSubamostragem(
+        estimador=interno,
+        estrategia=estrategia,
+        seed=seed,
+    )
+
+    tabela_folds, _ = executar_validacao_cruzada(
+        estimador=estimador,
+        X_treino=X_treino,
+        y_treino=y_treino,
+        seed=seed,
+        return_estimator=False,
+    )
+    resumo_cv = resumir_validacao_cruzada(tabela_folds)
+
+    pipeline = construir_pipeline(modelo=clone(estimador))
+    pipeline.fit(X_treino, y_treino)
+    probabilidades_holdout = pipeline.predict_proba(X_teste)[:, 1]
+    metricas_holdout = calcular_metricas_holdout(y_teste, probabilidades_holdout)
+
+    passo_modelo = pipeline.named_steps["modelo"]
+    with contexto_run(
+        nome=nome_run(familia_modelo, f"parte4_{estrategia.rotulo}", seed),
+        parametros={
+            "familia_modelo": familia_modelo,
+            "estrategia_amostragem": estrategia.rotulo,
+            "descricao_estrategia": estrategia.descricao(),
+            "origem_pesos": descrever_peso(parametros_modelo),
+            "tipo_modelo_pesos": _tipo_de_peso(parametros_modelo),
+            "proporcao_treino_pos_fold": round(passo_modelo.proporcao_treino_, 4),
+            "seed": seed,
+            "n_splits_cv": N_SPLITS_CV,
+            "k_fold": int(resumo_cv["k_fold"]),
+            "capacidade_mensal": CAPACIDADE_MENSAL,
+            "custo_pericia": CUSTO_PERICIA,
+            "custo_fraude_paga": CUSTO_FRAUDE_PAGA,
+            "aviso_prevalencia": (
+                "undersampling altera a prevalencia: probabilidade crua exige recalibragem"
+            ),
+            "features": list(FEATURES),
+            **parametros_modelo,
+        },
+        tags={
+            "fase": "4",
+            "parte": "4",
+            "modelo": familia_modelo,
+            "estrategia": estrategia.rotulo,
+        },
+    ) as registro:
+        registro.log_json(tabela_folds.to_dict(orient="records"), "tabela_cv.json")
+        registro.log_metricas(resumo_cv, prefixo="cv_")
+        registro.log_metricas(metricas_holdout, prefixo="holdout_")
+        registro.log_json(metricas_holdout, "metricas_holdout.json")
+
+    return ResultadoAmostragem(
+        familia_modelo=familia_modelo,
+        estrategia=estrategia.rotulo,
+        descricao_estrategia=estrategia.descricao(),
+        proporcao_treino=float(passo_modelo.proporcao_treino_),
+        k_fold=int(resumo_cv["k_fold"]),
+        pr_auc_cv_media=float(resumo_cv["pr_auc_cv_media"]),
+        pr_auc_cv_desvio=float(resumo_cv["pr_auc_cv_desvio"]),
+        roc_auc_cv_media=float(resumo_cv["roc_auc_cv_media"]),
+        roc_auc_cv_desvio=float(resumo_cv["roc_auc_cv_desvio"]),
+        precisao_k_cv_media=float(resumo_cv["precisao_k_cv_media"]),
+        resultado_k_cv_media=float(resumo_cv["resultado_k_cv_media"]),
+        resultado_k_cv_desvio=float(resumo_cv["resultado_k_cv_desvio"]),
+        pr_auc_holdout=float(metricas_holdout["pr_auc"]),
+        roc_auc_holdout=float(metricas_holdout["roc_auc"]),
+        brier_holdout=float(metricas_holdout["brier"]),
+        precisao_900_holdout=float(metricas_holdout["precisao_900"]),
+        cobertura_900_holdout=float(metricas_holdout["cobertura_900"]),
+        resultado_900_holdout=float(metricas_holdout["resultado_900"]),
+        tp_900_holdout=int(metricas_holdout["tp_900"]),
+        fp_900_holdout=int(metricas_holdout["fp_900"]),
+        fn_900_holdout=int(metricas_holdout["fn_900"]),
+        run_id=registro.run_id,
+    )
+
+
+def _tipo_de_peso(parametros_modelo: dict) -> str:
+    """Classifica o peso usado: nenhum, balanceado, custo 31 ou balanceamento 39,11."""
+    if "scale_pos_weight" in parametros_modelo:
+        return f"scale_pos_weight={parametros_modelo['scale_pos_weight']}"
+    peso = parametros_modelo.get("class_weight")
+    if peso is None:
+        return "sem_peso"
+    if peso == "balanced":
+        return "class_weight=balanced"
+    return "class_weight=custo31" if 31.0 in peso.values() else "class_weight=outro"
+
+
+def rodar_experimento_undersampling(seed: int = SEED) -> pd.DataFrame:
+    """Executa a Parte 4: as cinco estratégias sobre as quatro famílias vencedoras.
+
+    O controle de cada família é exatamente a configuração vencedora da Parte 3 sem
+    reamostragem — de propósito, para que os números do controle tenham de bater
+    com os da Parte 3 e provem que o experimento não mudou o protocolo.
+    """
+    X_treino, y_treino, X_teste, y_teste = carregar_treino_teste()
+    vencedores = carregar_tabela_parte3(ARQUIVO_VENCEDORES_PARTE3)
+    estrategias = estrategias_parte4()
+
+    resultados: list[ResultadoAmostragem] = []
+    for _, linha in vencedores.iterrows():
+        familia_modelo = str(linha["familia_modelo"])
+        parametros_modelo = reconstruir_parametros_vencedor(linha)
+        for estrategia in estrategias:
+            resultados.append(
+                avaliar_estrategia_amostragem(
+                    familia_modelo=familia_modelo,
+                    parametros_modelo=parametros_modelo,
+                    estrategia=estrategia,
+                    X_treino=X_treino,
+                    y_treino=y_treino,
+                    X_teste=X_teste,
+                    y_teste=y_teste,
+                    seed=seed,
+                )
+            )
+
+    tabela = pd.DataFrame([resultado.__dict__ for resultado in resultados])
+    return tabela.sort_values(
+        by=["familia_modelo", "resultado_k_cv_media"],
+        ascending=[True, False],
+    ).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Parte 5 — campeão, função de custo 31:1 e explicabilidade
+# ---------------------------------------------------------------------------
+
+SEMENTES_CAMPEAO: tuple[int, ...] = (42, 7, 2026, 123, 99)
+NOME_MODELO_REGISTRADO = "quilha-fraude-campeao"
+ALIAS_CAMPEAO = "champion"
+ARQUIVO_AMOSTRAGEM_PARTE4 = "parte4_amostragem.csv"
+
+# Corte teórico ótimo: períciar só quando p > 700 / 21.700. É o mesmo piso da
+# Fase 1 visto do outro lado — o custo da perícia dividido pelo custo de uma
+# fraude paga.
+LIMIAR_CORTE_TEORICO: float = CUSTO_PERICIA / CUSTO_FRAUDE_PAGA
+
+
+@dataclass(frozen=True)
+class CandidatoCampeao:
+    """Um candidato a campeão, com o que é preciso para reproduzi-lo."""
+
+    origem: str
+    familia_modelo: str
+    estrategia: str
+    resultado_900_holdout: float
+    pr_auc_holdout: float
+    tp_900_holdout: int
+    fp_900_holdout: int
+    fn_900_holdout: int
+    parametros_modelo: dict
+
+
+def montar_ranking_candidatos() -> pd.DataFrame:
+    """Une Partes 3 e 4 num único ranking, ordenado pelo Resultado Líquido@900.
+
+    Materializa o critério de campeão declarado no prompt: **dinheiro primeiro**.
+    As quatro famílias vencedoras da Parte 3 entram como candidatas `controle`; as
+    estratégias de amostragem da Parte 4 entram com o resultado que já mediram. As
+    linhas de `controle` da Parte 4 repetem, por construção, a Parte 3 — ficam de
+    fora para não duplicar candidato.
+    """
+    vencedores = carregar_tabela_parte3(ARQUIVO_VENCEDORES_PARTE3)
+    amostragem = carregar_tabela_parte3(ARQUIVO_AMOSTRAGEM_PARTE4)
+    parametros_por_familia = {
+        str(linha["familia_modelo"]): reconstruir_parametros_vencedor(linha)
+        for _, linha in vencedores.iterrows()
+    }
+
+    candidatos: list[CandidatoCampeao] = []
+
+    def _registrar(origem: str, linha: pd.Series, estrategia: str) -> None:
+        familia = str(linha["familia_modelo"])
+        candidatos.append(
+            CandidatoCampeao(
+                origem=origem,
+                familia_modelo=familia,
+                estrategia=estrategia,
+                resultado_900_holdout=float(linha["resultado_900_holdout"]),
+                pr_auc_holdout=float(linha["pr_auc_holdout"]),
+                tp_900_holdout=int(linha["tp_900_holdout"]),
+                fp_900_holdout=int(linha["fp_900_holdout"]),
+                fn_900_holdout=int(linha["fn_900_holdout"]),
+                parametros_modelo=parametros_por_familia[familia],
+            )
+        )
+
+    for _, linha in vencedores.iterrows():
+        _registrar("parte3", linha, "controle")
+    for _, linha in amostragem.iterrows():
+        estrategia = str(linha["estrategia"])
+        if estrategia == "controle":
+            continue
+        _registrar("parte4", linha, estrategia)
+
+    tabela = pd.DataFrame([candidato.__dict__ for candidato in candidatos])
+    return tabela.sort_values(
+        by=["resultado_900_holdout", "pr_auc_holdout"],
+        ascending=[False, False],
+    ).reset_index(drop=True)
+
+
+def estimador_do_candidato(candidato: pd.Series, seed: int = SEED) -> BaseEstimator:
+    """Monta o estimador de um candidato, com reamostragem quando a estratégia pede."""
+    interno = construir_estimador_modelo(
+        familia_modelo=str(candidato["familia_modelo"]),
+        parametros_modelo=dict(candidato["parametros_modelo"]),
+        seed=seed,
+    )
+    rotulo = str(candidato["estrategia"])
+    if rotulo == "controle":
+        return interno
+    for estrategia in estrategias_parte4():
+        if estrategia.rotulo == rotulo:
+            return ModeloComSubamostragem(estimador=interno, estrategia=estrategia, seed=seed)
+    raise ValueError(f"Estratégia de amostragem desconhecida: {rotulo}")
+
+
+def ajustar_candidato(
+    candidato: pd.Series,
+    X_treino: pd.DataFrame,
+    y_treino: pd.Series,
+    seed: int = SEED,
+) -> Pipeline:
+    """Ajusta o Pipeline do candidato no treino — o único `fit` que vê o treino."""
+    pipeline = construir_pipeline(modelo=estimador_do_candidato(candidato, seed=seed))
+    pipeline.fit(X_treino, y_treino)
+    return pipeline
+
+
+def avaliar_campeao_sementes(
+    candidato: pd.Series,
+    X_treino: pd.DataFrame,
+    y_treino: pd.Series,
+    X_teste: pd.DataFrame,
+    y_teste: pd.Series,
+    sementes: tuple[int, ...] = SEMENTES_CAMPEAO,
+) -> pd.DataFrame:
+    """Roda o campeão no holdout com as cinco sementes e registra cada run.
+
+    Uma semente só conta uma história; cinco mostram a dispersão. A primeira
+    semente também registra o Pipeline no Model Registry com o alias `champion` —
+    é o ponteiro que o app consome depois.
+    """
+    familia = str(candidato["familia_modelo"])
+    linhas: list[dict] = []
+
+    for seed in sementes:
+        estimador = estimador_do_candidato(candidato, seed=seed)
+        pipeline = construir_pipeline(modelo=estimador)
+        with contexto_run(
+            nome=nome_run(familia, "parte5_campeao", seed),
+            parametros={
+                "familia_modelo": familia,
+                "estrategia_amostragem": str(candidato["estrategia"]),
+                "origem_candidato": str(candidato["origem"]),
+                "papel_modelo": "campeao (maior Resultado Liquido@900 no holdout)",
+                "seed": seed,
+                "capacidade_mensal": CAPACIDADE_MENSAL,
+                "custo_pericia": CUSTO_PERICIA,
+                "custo_fraude_paga": CUSTO_FRAUDE_PAGA,
+                "limiar_corte_teorico": LIMIAR_CORTE_TEORICO,
+                "features": list(FEATURES),
+                **dict(candidato["parametros_modelo"]),
+            },
+            tags={"fase": "4", "parte": "5", "modelo": familia, "papel": "campeao"},
+        ) as registro:
+            pipeline.fit(X_treino, y_treino)
+            probabilidades = pipeline.predict_proba(X_teste)[:, 1]
+            metricas = calcular_metricas_holdout(y_teste, probabilidades)
+            registro.log_metricas(metricas, prefixo="holdout_")
+            registro.log_json(metricas, "metricas_holdout.json")
+            uri_modelo = registro.log_pipeline(pipeline, X_treino.head(1))
+            if seed == sementes[0]:
+                registro.registrar_modelo(
+                    NOME_MODELO_REGISTRADO,
+                    descricao=(
+                        "Campeao da Fase 4: maior Resultado Liquido@900 no holdout, "
+                        "validado em 5 sementes."
+                    ),
+                    tags={"fase": "4", "parte": "5", "familia_modelo": familia},
+                    alias=ALIAS_CAMPEAO,
+                )
+
+        linhas.append({"seed": seed, **metricas, "run_id": registro.run_id, "uri": uri_modelo})
+
+    return pd.DataFrame(linhas)
+
+
+def resumir_campeao(tabela: pd.DataFrame) -> dict[str, float | int | list[int]]:
+    """Média ± desvio das cinco sementes — o veredito de robustez do campeão."""
+    return {
+        "sementes": [int(s) for s in tabela["seed"]],
+        "resultado_900_media": float(tabela["resultado_900"].mean()),
+        "resultado_900_desvio": float(tabela["resultado_900"].std(ddof=1)),
+        "pr_auc_media": float(tabela["pr_auc"].mean()),
+        "pr_auc_desvio": float(tabela["pr_auc"].std(ddof=1)),
+        "roc_auc_media": float(tabela["roc_auc"].mean()),
+        "roc_auc_desvio": float(tabela["roc_auc"].std(ddof=1)),
+        "brier_media": float(tabela["brier"].mean()),
+        "tp_900_media": float(tabela["tp_900"].mean()),
+    }
+
+
+def decompor_custo_31_1(
+    y_true: pd.Series | np.ndarray,
+    probabilidades: np.ndarray,
+    k: int = CAPACIDADE_MENSAL,
+    limiar: float = LIMIAR_CORTE_TEORICO,
+) -> dict:
+    """Decompõe a função de custo 31:1 nos dois cortes: teórico e prático.
+
+    A conta, escrita por extenso para o comitê:
+
+        Custo        = 21.700 x FN + 700 x FP
+        Custo evitado = 21.700 x TP
+        Resultado líquido = Custo evitado - 700 x (nº de perícias)
+
+    O **corte teórico** perícia todo sinistro com p >= 3,2258% (o ponto em que a
+    perícia se paga). O **corte prático** perícia os `k` sinistros mais arriscados
+    — é o que a capacidade de 900/mês permite.
+    """
+    y = np.asarray(y_true, dtype=int)
+    proba = _probabilidade_positiva(probabilidades)
+    positivos = int(y.sum())
+
+    def _corte(selecao: np.ndarray) -> dict[str, float | int]:
+        tp = int(y[selecao].sum())
+        n_periciados = int(selecao.sum())
+        fp = n_periciados - tp
+        fn = positivos - tp
+        return {
+            "n_periciados": n_periciados,
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "custo_falso_negativo": float(CUSTO_FRAUDE_PAGA * fn),
+            "custo_falso_positivo": float(CUSTO_PERICIA * fp),
+            "custo_total": float(CUSTO_FRAUDE_PAGA * fn + CUSTO_PERICIA * fp),
+            "custo_evitado": float(CUSTO_FRAUDE_PAGA * tp),
+            "resultado_liquido": float(CUSTO_FRAUDE_PAGA * tp - CUSTO_PERICIA * n_periciados),
+            "precisao": float(tp / n_periciados) if n_periciados else 0.0,
+            "cobertura": float(tp / positivos) if positivos else 0.0,
+        }
+
+    ordem = np.argsort(-proba, kind="mergesort")
+    selecao_pratica = np.zeros(len(y), dtype=bool)
+    selecao_pratica[ordem[: min(k, len(y))]] = True
+
+    return {
+        "limiar_teorico": float(limiar),
+        "n_fraudes_holdout": positivos,
+        "custo_total_sem_modelo": float(CUSTO_FRAUDE_PAGA * positivos),
+        "corte_teorico": _corte(proba >= limiar),
+        "corte_pratico": _corte(selecao_pratica),
+    }
+
+
+def rodar_analise_custo_familias(seed: int = SEED) -> pd.DataFrame:
+    """Responde à pergunta obrigatória: o custo 31:1 de cada família vencedora.
+
+    Uma única passada por família: ajusta no treino, mede o holdout e decompõe o
+    custo nos dois cortes. É a tabela que sustenta (ou derruba) a afirmação de que
+    o XGBoost é o modelo que mais reduz a função de custo.
+    """
+    X_treino, y_treino, X_teste, y_teste = carregar_treino_teste()
+    vencedores = carregar_tabela_parte3(ARQUIVO_VENCEDORES_PARTE3)
+    linhas: list[dict] = []
+
+    for _, linha in vencedores.iterrows():
+        familia = str(linha["familia_modelo"])
+        parametros = reconstruir_parametros_vencedor(linha)
+        pipeline = construir_pipeline(
+            modelo=construir_estimador_modelo(familia, parametros, seed=seed)
+        )
+        with contexto_run(
+            nome=nome_run(familia, "parte5_custo31", seed),
+            parametros={
+                "familia_modelo": familia,
+                "papel_modelo": "analise da funcao de custo 31:1",
+                "seed": seed,
+                "capacidade_mensal": CAPACIDADE_MENSAL,
+                "custo_pericia": CUSTO_PERICIA,
+                "custo_fraude_paga": CUSTO_FRAUDE_PAGA,
+                "limiar_corte_teorico": LIMIAR_CORTE_TEORICO,
+                **parametros,
+            },
+            tags={"fase": "4", "parte": "5", "modelo": familia, "analise": "custo_31_1"},
+        ) as registro:
+            pipeline.fit(X_treino, y_treino)
+            probabilidades = pipeline.predict_proba(X_teste)[:, 1]
+            decomposicao = decompor_custo_31_1(y_teste, probabilidades)
+            registro.log_json(decomposicao, "custo_31_1.json")
+            for corte, prefixo in (("corte_teorico", "teorico_"), ("corte_pratico", "pratico_")):
+                registro.log_metricas(decomposicao[corte], prefixo=prefixo)
+
+        teorico = decomposicao["corte_teorico"]
+        pratico = decomposicao["corte_pratico"]
+        linhas.append(
+            {
+                "familia_modelo": familia,
+                "limiar_teorico": decomposicao["limiar_teorico"],
+                "n_fraudes_holdout": decomposicao["n_fraudes_holdout"],
+                "custo_total_sem_modelo": decomposicao["custo_total_sem_modelo"],
+                "teorico_n_periciados": teorico["n_periciados"],
+                "teorico_tp": teorico["tp"],
+                "teorico_fp": teorico["fp"],
+                "teorico_fn": teorico["fn"],
+                "teorico_custo_total": teorico["custo_total"],
+                "teorico_custo_evitado": teorico["custo_evitado"],
+                "teorico_resultado_liquido": teorico["resultado_liquido"],
+                "pratico_n_periciados": pratico["n_periciados"],
+                "pratico_tp": pratico["tp"],
+                "pratico_fp": pratico["fp"],
+                "pratico_fn": pratico["fn"],
+                "pratico_custo_total": pratico["custo_total"],
+                "pratico_custo_evitado": pratico["custo_evitado"],
+                "pratico_resultado_liquido": pratico["resultado_liquido"],
+                "run_id": registro.run_id,
+            }
+        )
+
+    return pd.DataFrame(linhas).sort_values(
+        by="pratico_resultado_liquido", ascending=False
+    ).reset_index(drop=True)
+
+
+def curva_resultado_k(
+    y_true: pd.Series | np.ndarray,
+    probabilidades: np.ndarray,
+) -> tuple[pd.DataFrame, dict[str, float | int]]:
+    """Curva Resultado(k) para k de 0 até o tamanho do holdout.
+
+    Devolve a tabela `(k, tp, precisao, resultado_liquido, custo_total,
+    probabilidade_do_k-esimo)` e o resumo com o k que maximiza o resultado, o k do
+    corte teórico (onde a probabilidade cruza os 3,2258%) e o k de 900.
+    """
+    y = np.asarray(y_true, dtype=int)
+    proba = _probabilidade_positiva(probabilidades)
+    ordem = np.argsort(-proba, kind="mergesort")
+    y_ordenado = y[ordem]
+    proba_ordenada = proba[ordem]
+    n = len(y)
+
+    k = np.arange(0, n + 1)
+    tp = np.concatenate([[0], np.cumsum(y_ordenado)])
+    resultado = CUSTO_FRAUDE_PAGA * tp - CUSTO_PERICIA * k
+    custo = CUSTO_FRAUDE_PAGA * (int(y.sum()) - tp) + CUSTO_PERICIA * (k - tp)
+    precisao = np.divide(tp, k, out=np.zeros(n + 1, dtype=float), where=k > 0)
+
+    tabela = pd.DataFrame(
+        {
+            "k": k,
+            "tp": tp,
+            "precisao": precisao,
+            "resultado_liquido": resultado,
+            "custo_total": custo,
+            "probabilidade_do_k_esimo": np.concatenate([[np.nan], proba_ordenada]),
+        }
+    )
+
+    indice_otimo = int(np.argmax(resultado))
+    k_teorico = int((proba >= LIMIAR_CORTE_TEORICO).sum())
+    ainda_lucrativo = np.nonzero(resultado > 0)[0]
+    resumo: dict[str, float | int] = {
+        "k_otimo_empirico": int(k[indice_otimo]),
+        "resultado_maximo": float(resultado[indice_otimo]),
+        "k_corte_teorico": k_teorico,
+        "resultado_no_corte_teorico": float(resultado[k_teorico]),
+        "resultado_em_900": float(resultado[min(CAPACIDADE_MENSAL, n)]),
+        "k_maximo_ainda_lucrativo": int(ainda_lucrativo.max()) if len(ainda_lucrativo) else 0,
+    }
+    return tabela, resumo
+
+
+def salvar_curva_resultado_k(
+    tabela: pd.DataFrame,
+    resumo: dict[str, float | int],
+    caminho: Path | str | None = None,
+) -> Path:
+    """Gera a figura da curva Resultado(k), com o corte teórico e o de 900 marcados."""
+    if caminho is None:
+        caminho = PASTA_FIGURAS / "parte5_curva_resultado_k.png"
+    caminho = Path(caminho)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+
+    figura, eixo = plt.subplots(figsize=(11, 6))
+    eixo.plot(
+        tabela["k"],
+        tabela["resultado_liquido"] / 1000.0,
+        color="#1f4e79",
+        lw=2,
+        label="Resultado líquido (R$ mil)",
+    )
+    eixo.axvline(
+        int(resumo["k_otimo_empirico"]),
+        color="#2e7d32",
+        ls="--",
+        lw=1.5,
+        label=f"k* empírico = {int(resumo['k_otimo_empirico'])}",
+    )
+    eixo.axvline(
+        CAPACIDADE_MENSAL,
+        color="#c62828",
+        ls=":",
+        lw=1.5,
+        label=f"corte prático = {CAPACIDADE_MENSAL}",
+    )
+    eixo.axvline(
+        int(resumo["k_corte_teorico"]),
+        color="#f9a825",
+        ls="-.",
+        lw=1.5,
+        label=f"corte teórico p* = {int(resumo['k_corte_teorico'])}",
+    )
+    eixo.axhline(0.0, color="0.4", lw=1)
+    eixo.set_xlabel("k — sinistros periciados, por ordem decrescente de risco")
+    eixo.set_ylabel("Resultado líquido (R$ mil)")
+    eixo.set_title("Parte 5 — curva Resultado(k) do campeão no holdout")
+    eixo.grid(alpha=0.3)
+    eixo.legend(loc="lower left")
+
+    # Eixo secundário: probabilidade do k-ésimo sinistro, com a linha de 3,2258%.
+    eixo_prob = eixo.twinx()
+    mascara = tabela["k"] > 0
+    eixo_prob.plot(
+        tabela.loc[mascara, "k"],
+        tabela.loc[mascara, "probabilidade_do_k_esimo"] * 100.0,
+        color="0.6",
+        lw=1,
+        alpha=0.8,
+    )
+    eixo_prob.axhline(
+        LIMIAR_CORTE_TEORICO * 100.0,
+        color="#8e24aa",
+        ls="--",
+        lw=1.2,
+        label="precisão marginal 3,2258%",
+    )
+    eixo_prob.set_ylabel("Probabilidade do k-ésimo (%)", color="0.4")
+    eixo_prob.set_yscale("log")
+    eixo_prob.legend(loc="upper right")
+
+    figura.tight_layout()
+    figura.savefig(caminho, dpi=150)
+    plt.close(figura)
+    return caminho
+
+
+def avaliar_calibracao(
+    candidato: pd.Series,
+    X_treino: pd.DataFrame,
+    y_treino: pd.Series,
+    X_teste: pd.DataFrame,
+    y_teste: pd.Series,
+    seed: int = SEED,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compara a escala de probabilidade do campeão com isotônica e Platt.
+
+    O campeão não usa peso de classe, então a probabilidade já sai na escala
+    natural (prevalência de ~2,47%) — a calibração **não** é obrigatória. Ainda
+    assim medimos: o app entrega a probabilidade ao analista, e é preciso saber se
+    ela significa o que diz. Cada calibrador é ajustado **dentro do treino**
+    (`cross_val_predict` do próprio `CalibratedClassifierCV`), nunca no holdout.
+
+    Devolve `(tabela_comparativa, curva_de_confiabilidade)`.
+    """
+    validacao = construir_validacao_cruzada(seed=seed)
+
+    def _brier(probabilidades: np.ndarray) -> float:
+        return float(brier_score_loss(y_teste, probabilidades))
+
+    linhas: list[dict] = []
+    pipeline = ajustar_candidato(candidato, X_treino, y_treino, seed=seed)
+    proba_padrao = pipeline.predict_proba(X_teste)[:, 1]
+    linhas.append(
+        {
+            "modelo": "campeao (sem calibracao)",
+            "brier": _brier(proba_padrao),
+            "n_acima_do_limiar": int((proba_padrao >= LIMIAR_CORTE_TEORICO).sum()),
+        }
+    )
+
+    for metodo in ("isotonic", "sigmoid"):
+        calibrado = CalibratedClassifierCV(
+            estimator=construir_pipeline(modelo=estimador_do_candidato(candidato, seed=seed)),
+            method=metodo,
+            cv=validacao,
+        )
+        calibrado.fit(X_treino, y_treino)
+        proba_calibrada = calibrado.predict_proba(X_teste)[:, 1]
+        linhas.append(
+            {
+                "modelo": f"campeao + {metodo}",
+                "brier": _brier(proba_calibrada),
+                "n_acima_do_limiar": int((proba_calibrada >= LIMIAR_CORTE_TEORICO).sum()),
+            }
+        )
+
+    fracao_positivos, probabilidade_media = calibration_curve(
+        y_teste, proba_padrao, n_bins=10, strategy="quantile"
+    )
+    curva = pd.DataFrame(
+        {"probabilidade_media": probabilidade_media, "fracao_positivos": fracao_positivos}
+    )
+    return pd.DataFrame(linhas), curva
+
+
+def salvar_curva_calibracao(curva: pd.DataFrame, caminho: Path | str | None = None) -> Path:
+    """Diagrama de confiabilidade: probabilidade prevista contra a observada."""
+    caminho = Path(caminho) if caminho is not None else PASTA_FIGURAS / "parte5_calibracao.png"
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+
+    figura, eixo = plt.subplots(figsize=(7, 7))
+    eixo.plot([0, 1], [0, 1], ls="--", color="0.5", label="calibração perfeita")
+    eixo.plot(
+        curva["probabilidade_media"],
+        curva["fracao_positivos"],
+        marker="o",
+        color="#1f4e79",
+        label="campeão",
+    )
+    eixo.set_xlabel("Probabilidade prevista (média do bin)")
+    eixo.set_ylabel("Fração de fraudes observada")
+    eixo.set_title("Parte 5 — curva de calibração do campeão no holdout")
+    eixo.grid(alpha=0.3)
+    eixo.legend(loc="upper left")
+    figura.tight_layout()
+    figura.savefig(caminho, dpi=150)
+    plt.close(figura)
+    return caminho
+
+
+def avaliar_ablacao(
+    familia_modelo: str,
+    parametros_modelo: dict,
+    colunas_removidas: tuple[str, ...],
+    X_treino: pd.DataFrame,
+    y_treino: pd.Series,
+    X_teste: pd.DataFrame,
+    y_teste: pd.Series,
+    seed: int = SEED,
+) -> dict[str, float]:
+    """ROC AUC e PR AUC no holdout com as colunas indicadas fora do modelo.
+
+    É a ablação exigida pela Pergunta 1: medir o quanto `uf` e `idade_segurado`
+    acrescentam de fato, em vez de supor.
+    """
+    estimador = construir_estimador_modelo(familia_modelo, parametros_modelo, seed=seed)
+    pipeline = construir_pipeline(modelo=estimador, colunas_excluidas=tuple(colunas_removidas))
+    pipeline.fit(X_treino, y_treino)
+    probabilidades = pipeline.predict_proba(X_teste)[:, 1]
+    return {
+        "roc_auc": float(roc_auc_score(y_teste, probabilidades)),
+        "pr_auc": float(average_precision_score(y_teste, probabilidades)),
+    }
+
+
+def rodar_ablacao_campeao(
+    candidato: pd.Series,
+    X_treino: pd.DataFrame,
+    y_treino: pd.Series,
+    X_teste: pd.DataFrame,
+    y_teste: pd.Series,
+    colunas: tuple[str, ...] = ("uf", "idade_segurado"),
+    seed: int = SEED,
+) -> pd.DataFrame:
+    """Roda a ablação do campeão com e sem as colunas pedidas."""
+    familia = str(candidato["familia_modelo"])
+    parametros = dict(candidato["parametros_modelo"])
+
+    completo = avaliar_ablacao(familia, parametros, (), X_treino, y_treino, X_teste, y_teste, seed)
+    sem_colunas = avaliar_ablacao(
+        familia, parametros, colunas, X_treino, y_treino, X_teste, y_teste, seed
+    )
+    linhas = [
+        {"cenario": "completo", **completo},
+        {"cenario": f"sem {' + '.join(colunas)}", **sem_colunas},
+        {
+            "cenario": "variacao",
+            "roc_auc": sem_colunas["roc_auc"] - completo["roc_auc"],
+            "pr_auc": sem_colunas["pr_auc"] - completo["pr_auc"],
+        },
+    ]
+    return pd.DataFrame(linhas)
+
+
+def importancia_shap(
+    pipeline: Pipeline,
+    fundo: pd.DataFrame,
+    amostra: pd.DataFrame,
+    n_fundo: int = 100,
+    semente: int = SEED,
+) -> pd.Series:
+    """Importância média absoluta do SHAP, agregada por feature original."""
+    contribuicoes = contribuicoes_agregadas(
+        pipeline=pipeline,
+        fundo=fundo,
+        amostra=amostra,
+        n_fundo=n_fundo,
+        semente=semente,
+    )
+    return contribuicoes.abs().mean(axis=0).sort_values(ascending=False)
+
+
+def salvar_shap_summary(importancia: pd.Series, caminho: Path | str | None = None) -> Path:
+    """Barras horizontais da importância SHAP média absoluta por feature original."""
+    caminho = caminho if caminho is not None else PASTA_FIGURAS / "parte5_shap_summary.png"
+    caminho = Path(caminho)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+
+    ordenada = importancia.sort_values()
+    figura, eixo = plt.subplots(figsize=(9, 0.42 * len(ordenada) + 2))
+    eixo.barh(ordenada.index, ordenada.to_numpy(), color="#1f4e79")
+    eixo.set_xlabel("Contribuição SHAP média absoluta (variação na probabilidade de fraude)")
+    eixo.set_title("Parte 5 — SHAP summary do campeão, agregado por feature original")
+    eixo.grid(axis="x", alpha=0.3)
+    figura.tight_layout()
+    figura.savefig(caminho, dpi=150)
+    plt.close(figura)
+    return caminho
+
+
+def salvar_shap_local(
+    contribuicoes: pd.Series,
+    titulo: str,
+    caminho: Path | str,
+    maximo_features: int = 10,
+) -> Path:
+    """Barras da contribuição SHAP de UM sinistro, com o texto de negócio no título."""
+    caminho = Path(caminho)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+
+    recorte = contribuicoes.head(maximo_features).iloc[::-1]
+    cores = ["#c62828" if valor > 0 else "#2e7d32" for valor in recorte.to_numpy()]
+
+    figura, eixo = plt.subplots(figsize=(9, 0.5 * len(recorte) + 2))
+    eixo.barh(recorte.index, recorte.to_numpy(), color=cores)
+    eixo.axvline(0.0, color="0.4", lw=1)
+    eixo.set_xlabel(
+        "Contribuição SHAP (variação na probabilidade de fraude) — vermelho empurra para fraude"
+    )
+    eixo.set_title(titulo)
+    eixo.grid(axis="x", alpha=0.3)
+    figura.tight_layout()
+    figura.savefig(caminho, dpi=150)
+    plt.close(figura)
+    return caminho
+
+
+# ---------------------------------------------------------------------------
+# Parte 5 — SHAP local dos três casos narrados de negócio (item 7)
+# ---------------------------------------------------------------------------
+
+CASOS_SHAP_LOCAIS: tuple[str, ...] = ("fraude_pega", "fraude_perdida", "legitimo_topo")
+
+TITULOS_CASOS_SHAP: dict[str, str] = {
+    "fraude_pega": "Fraude pega — periciado no corte de 900 e confirmado",
+    "fraude_perdida": "Fraude perdida — fraude real fora das 900 perícias",
+    "legitimo_topo": "Falso positivo — sinistro legítimo no topo da fila",
+}
+
+
+def selecionar_casos_shap(
+    y_teste: pd.Series | np.ndarray,
+    probabilidades: np.ndarray,
+    k: int = CAPACIDADE_MENSAL,
+) -> dict[str, int]:
+    """Localiza no holdout os três sinistros que a narrativa de negócio pede.
+
+    * `fraude_pega`    — fraude real (y=1) dentro do corte de 900, a de maior risco;
+    * `fraude_perdida` — fraude real (y=1) fora do corte de 900, a de maior risco;
+    * `legitimo_topo`  — sinistro legítimo (y=0) dentro do corte de 900, o de maior risco.
+
+    Devolve o índice posicional no holdout. Se um caso não existir, devolve -1 — falha
+    visível, nunca silenciosa.
+    """
+    y = np.asarray(y_teste, dtype=int)
+    proba = _probabilidade_positiva(probabilidades)
+    ordem = np.argsort(-proba, kind="mergesort")
+    selecao = np.zeros(len(y), dtype=bool)
+    selecao[ordem[: min(k, len(y))]] = True
+
+    def _de_maior_risco(mascara: np.ndarray) -> int:
+        # `ordem` já vem do maior risco para o menor: o primeiro que casa é o campeão do grupo.
+        candidatos = ordem[mascara[ordem]]
+        return int(candidatos[0]) if candidatos.size else -1
+
+    return {
+        "fraude_pega": _de_maior_risco(selecao & (y == 1)),
+        "fraude_perdida": _de_maior_risco((~selecao) & (y == 1)),
+        "legitimo_topo": _de_maior_risco(selecao & (y == 0)),
+    }
+
+
+def _narrativa_caso(caso: str, probabilidade: float, contribuicoes: pd.Series, n: int = 3) -> str:
+    """Frase de negócio montada a partir das contribuições SHAP — nada digitado à mão."""
+    aberturas = {
+        "fraude_pega": (
+            "Periciado no corte de 900 e confirmado como fraude "
+            f"(probabilidade {probabilidade:.4f})"
+        ),
+        "fraude_perdida": (
+            f"Fraude real que ficou fora das 900 perícias (probabilidade {probabilidade:.4f})"
+        ),
+        "legitimo_topo": (
+            "Sinistro legítimo que entrou na fila e consumiu perícia "
+            f"(probabilidade {probabilidade:.4f})"
+        ),
+    }
+    principais = contribuicoes.head(n)
+    trecho = "; ".join(f"{nome} {valor:+.4f}" for nome, valor in principais.items())
+    return f"{aberturas[caso]}. Sinais que mais empurraram a decisão: {trecho}."
+
+
+def explicar_casos_locais(
+    pipeline: Pipeline,
+    X_treino: pd.DataFrame,
+    X_teste: pd.DataFrame,
+    y_teste: pd.Series,
+    probabilidades: np.ndarray,
+    pasta: Path | str | None = None,
+    n_fundo: int = 100,
+    semente: int = SEED,
+) -> tuple[pd.DataFrame, list[Path]]:
+    """SHAP local de 3 sinistros reais, com a narrativa do porquê (item 7 da Parte 5).
+
+    Executa o `explicar_sinistro` — o caminho que o app percorre ao explicar um chamado
+    novo — para um fraude pega, um fraude perdida e um legítimo no topo da fila. Devolve
+    `(tabela_dos_casos, lista_de_figuras)`.
+    """
+    pasta_figuras = Path(pasta) if pasta is not None else PASTA_FIGURAS
+    pasta_figuras.mkdir(parents=True, exist_ok=True)
+
+    proba = _probabilidade_positiva(probabilidades)
+    y_array = np.asarray(y_teste, dtype=int)
+    indices = selecionar_casos_shap(y_array, proba)
+
+    linhas: list[dict] = []
+    figuras: list[Path] = []
+    for caso in CASOS_SHAP_LOCAIS:
+        indice = indices[caso]
+        if indice < 0:
+            raise RuntimeError(f"Holdout não contém um caso '{caso}' para explicar.")
+        contribuicoes = explicar_sinistro(
+            pipeline=pipeline,
+            linha=X_teste.iloc[[indice]],
+            fundo=X_treino,
+            n_fundo=n_fundo,
+            semente=semente,
+        )
+        caminho = pasta_figuras / f"parte5_shap_local_{caso}.png"
+        salvar_shap_local(contribuicoes, TITULOS_CASOS_SHAP[caso], caminho)
+        figuras.append(caminho)
+        linhas.append(
+            {
+                "caso": caso,
+                "indice_holdout": indice,
+                "probabilidade": float(proba[indice]),
+                "fraude_real": int(y_array[indice]),
+                "top_features": ", ".join(contribuicoes.head(3).index),
+                "narrativa": _narrativa_caso(caso, float(proba[indice]), contribuicoes),
+            }
+        )
+    return pd.DataFrame(linhas), figuras
