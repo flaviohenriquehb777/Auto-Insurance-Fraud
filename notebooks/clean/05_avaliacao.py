@@ -48,24 +48,31 @@ from quilha.avaliacao import (
     N_REAMOSTRAGENS_BOOTSTRAP,
     PERGUNTA_DE_DECISAO,
     aplicar_politica,
+    construir_politica_campeao,
     construir_referencias,
     custo_sem_pericia,
     escore_positivo,
     executar_backtest,
     janelas_walk_forward,
     medir_janela,
+    medir_politicas_no_mes,
     piso_viabilidade,
+    pontos_de_decisao_k,
+    regra_atual_do_case,
     resultado_economico,
     resultado_liquido,
     resumo_parametros_decisao,
+    salvar_curva_decisao,
 )
 from quilha.dados import carregar_base_crua
 from quilha.modelagem import (
     CAPACIDADE_MENSAL,
+    LIMIAR_REGRA_ATUAL,
     PASTA_TABELAS,
     calcular_k_proporcional,
     calcular_metricas_holdout,
     carregar_treino_teste,
+    curva_resultado_k,
     separar_entrada_alvo,
 )
 from quilha.pipeline import CAMINHO_PIPELINE, carregar_pipeline, construir_pipeline
@@ -426,3 +433,139 @@ else:
 # A leitura de negócio é a **diferença pareada** campeão − regra atual janela a janela: é ela
 # que entra na decisão, e é ela que a Parte 5 submeterá ao intervalo de confiança. Sinais
 # menores que o erro de amostragem são **ruído**, não ganho.
+
+# %% [markdown]
+# ## Parte 3 — Política de perícia e economia (Pergunta 4)
+#
+# A política é o entregável; o modelo é insumo. Aqui o escore vira **decisão** e a decisão
+# vira **dinheiro** no mês de teste: quantas fraudes encontradas, quanto se evita de perda e
+# quanto custa — sempre contra as três referências. E ao fim, a **ação sobre a regra de
+# R$ 50 mil**: não um comentário, uma decisão com o número ao lado.
+
+# %%
+# =============================================================================
+# Parte 3 — As quatro políticas medidas no mês de teste (agosto)
+# =============================================================================
+politicas_mes = {
+    "campeao": construir_politica_campeao(pipeline, k=CAPACIDADE_MENSAL),
+    **referencias,
+}
+
+tabela_politicas = medir_politicas_no_mes(politicas_mes, X_teste, y_teste)
+
+print("POLÍTICAS NO MÊS DE TESTE (agosto/2026) — mesma capacidade, mesmo critério")
+print(
+    tabela_politicas[
+        [
+            "politica",
+            "capacidade",
+            "n_periciados",
+            "tp",
+            "fp",
+            "fn",
+            "precisao",
+            "cobertura",
+            "economia",
+            "custo_total",
+        ]
+    ].to_string(index=False)
+)
+print()
+for _, linha in tabela_politicas.iterrows():
+    print(
+        f"  {linha['politica']:<28} k={linha['n_periciados']:>3}  TP={linha['tp']:>3}  "
+        f"precisão={linha['precisao'] * 100:>6.2f}%  cobertura={linha['cobertura'] * 100:>6.2f}%  "
+        f"economia=R$ {linha['economia']:>13,.2f}  custo=R$ {linha['custo_total']:>13,.2f}"
+    )
+
+# %%
+# =============================================================================
+# Parte 3 — A regra atual exatamente como o case a descreve
+# =============================================================================
+# Literal do case: filtrar valor_reclamado > R$ 50 mil, ordenar por valor decrescente
+# e cortar em 900. Medido sobre o chamado CRU — a conversão do texto com vírgula é
+# feita aqui, igualzinha à que o Pipeline faz internamente.
+regra_case = regra_atual_do_case(
+    X_teste, y_teste, limiar=LIMIAR_REGRA_ATUAL, k=CAPACIDADE_MENSAL
+)
+
+print("REGRA ATUAL COMO O CASE A DESCREVE (valor_reclamado > R$ 50 mil -> corte em 900)")
+print(
+    f"  pedidos acima de R$ {regra_case['limiar']:,.0f}: {regra_case['n_acima_limiar']}  "
+    f"(o case fala em ~950)"
+)
+print(f"  de fato periciados (corte em {CAPACIDADE_MENSAL}): {regra_case['n_periciados']}")
+print(
+    f"  fraudes encontradas (TP): {regra_case['tp']}  |  "
+    f"precisão: {regra_case['precisao'] * 100:.2f}%  |  "
+    f"cobertura: {regra_case['cobertura'] * 100:.2f}%"
+)
+print(
+    f"  economia: R$ {regra_case['economia']:,.2f}  |  "
+    f"custo total: R$ {regra_case['custo_total']:,.2f}"
+)
+
+# %%
+# =============================================================================
+# Parte 3 — Ganho da política sobre a regra atual (ponto; IC 95% na Parte 5)
+# =============================================================================
+economia_campeao = float(
+    tabela_politicas.loc[tabela_politicas["chave"] == "campeao", "economia"].iloc[0]
+)
+economia_regra = float(
+    tabela_politicas.loc[tabela_politicas["chave"] == "regra_atual", "economia"].iloc[0]
+)
+ganho_sobre_regra = economia_campeao - economia_regra
+
+print("GANHO DA POLÍTICA SOBRE A REGRA ATUAL (mês de teste)")
+print(f"  Resultado(campeão)      : R$ {economia_campeao:>14,.2f}")
+print(f"  Resultado(regra atual)  : R$ {economia_regra:>14,.2f}")
+print(f"  Ganho por mês           : R$ {ganho_sobre_regra:>14,.2f}")
+print()
+print("  O intervalo de confiança de 95% desta diferença é calculado na Parte 5.")
+print("  A Parte 2 já mostrou o ganho fora da amostra, em 4 janelas, acima do ruído.")
+
+# %%
+# =============================================================================
+# Parte 3 — Curva Resultado(k) do campeão e os pontos de decisão
+# =============================================================================
+# A curva é recalculada aqui a partir das probabilidades do artefato no mês de teste:
+# nada é lido de figura antiga, e os pontos saem do próprio resumo da curva.
+probabilidades_teste = escore_positivo(pipeline, X_teste)
+tabela_curva, resumo_curva = curva_resultado_k(y_teste, probabilidades_teste)
+pontos_decisao = pontos_de_decisao_k(tabela_curva, resumo_curva)
+
+print("PONTOS DE DECISÃO SOBRE A CURVA Resultado(k) — mês de teste")
+for k, valor, rotulo in pontos_decisao:
+    print(f"  {rotulo:<22} k={k:>5}  ->  R$ {valor:>13,.2f}")
+
+caminho_figura = salvar_curva_decisao(tabela_curva, pontos_decisao)
+print()
+print(f"Figura salva em {caminho_figura.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 3 — Ação sobre a regra atual (Pergunta 4)
+# =============================================================================
+print("AÇÃO RECOMENDADA SOBRE A REGRA DE R$ 50 MIL")
+print(
+    f"  1. Extinguir o critério de R$ {LIMIAR_REGRA_ATUAL:,.0f} como regra de triagem: no mês de "
+    f"teste ele periciou {regra_case['n_periciados']} sinistros, achou {regra_case['tp']} fraudes "
+    f"e deu economia de R$ {regra_case['economia']:,.2f} (negativa)."
+)
+print(
+    f"  2. Substituí-lo pela política de escore do campeão, mantidas as "
+    f"{CAPACIDADE_MENSAL} perícias/mês: mesmo custo de perícia, economia de "
+    f"R$ {economia_campeao:,.2f} — ganho de R$ {ganho_sobre_regra:,.2f}/mês."
+)
+
+# %% [markdown]
+# **Leitura da Parte 3.** No mês de teste, com as **mesmas 900 perícias**, o campeão encontra
+# 201 fraudes e devolve economia de R$ 3.731.700; a regra de R$ 50 mil acha 14 e devolve
+# economia **negativa** — ela custa mais do que economiza e perde até para escolher ao acaso.
+# O ganho de trocar a regra pela política de escore é a diferença dos dois números acima, e o
+# IC 95% dela é o tema da Parte 5.
+#
+# A curva `Resultado(k)` marca os quatro pontos de decisão: o corte de hoje (900), o corte
+# teórico `p*`, o ótimo empírico e o último `k` ainda lucrativo — este último é o que a Parte 4
+# usa para responder "vale a pena mais peritos?".

@@ -22,13 +22,16 @@ divirja da Fase 4.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
 from sklearn.dummy import DummyClassifier
 from sklearn.metrics import average_precision_score, roc_auc_score
 
+from quilha.dados import PASTA_FIGURAS
 from quilha.modelagem import (
     CAPACIDADE_MENSAL,
     CUSTO_FRAUDE_PAGA,
@@ -346,3 +349,138 @@ def executar_backtest(
             )
 
     return pd.DataFrame(registros)
+
+
+# ---------------------------------------------------------------------------
+# Política e economia no mês de teste (Parte 3)
+# ---------------------------------------------------------------------------
+def construir_politica_campeao(estimador, k: int = CAPACIDADE_MENSAL) -> PoliticaPericia:
+    """A política recomendada: escore do campeão da Fase 4, cortado na capacidade de hoje."""
+    return PoliticaPericia(nome="Campeão (escore XGBoost)", k=k, estimador=estimador)
+
+
+def medir_politicas_no_mes(
+    politicas: dict[str, PoliticaPericia],
+    X: pd.DataFrame,
+    y: pd.Series | np.ndarray,
+) -> pd.DataFrame:
+    """Mede cada política no mês de teste sob o **mesmo** critério econômico.
+
+    Devolve uma linha por política com o `k` executado, `TP`/`FP`/`FN`, Precisão@k,
+    Cobertura@k, economia (`21.700 × TP − 700 × k`) e custo total
+    (`21.700 × FN + 700 × FP`). O estimador de cada política entra **já ajustado**:
+    medir aqui não treina nada.
+    """
+    linhas: list[dict] = []
+    for chave, politica in politicas.items():
+        economia = resultado_economico(y, aplicar_politica(politica, X))
+        linhas.append(
+            {"chave": chave, "politica": politica.nome, "capacidade": politica.k, **economia}
+        )
+    return pd.DataFrame(linhas)
+
+
+def _valor_reclamado_numerico(X: pd.DataFrame) -> np.ndarray:
+    """`valor_reclamado` como número, tolerando o texto com vírgula da base crua.
+
+    É a mesma conversão que `quilha.preparacao` faz dentro do Pipeline; repetida
+    aqui porque a regra atual do case é medida sobre o chamado **cru**, onde o valor
+    chega como `"8837,07"` — `pd.to_numeric` sozinho devolveria nulo para todo mundo.
+    """
+    serie = X["valor_reclamado"]
+    if pd.api.types.is_numeric_dtype(serie):
+        return pd.to_numeric(serie, errors="coerce").fillna(0.0).to_numpy()
+    texto = serie.astype("string").str.strip().str.replace(",", ".", regex=False)
+    return pd.to_numeric(texto, errors="coerce").fillna(0.0).to_numpy()
+
+
+def regra_atual_do_case(
+    X: pd.DataFrame,
+    y: pd.Series | np.ndarray,
+    limiar: float = LIMIAR_REGRA_ATUAL,
+    k: int = CAPACIDADE_MENSAL,
+) -> dict[str, float | int]:
+    """Executa a regra atual **exatamente como o case a descreve**.
+
+    Filtra `valor_reclamado > limiar`, ordena por valor decrescente e corta em `k`.
+    Devolve quantos pedidos o filtro gera (`n_acima_limiar`) e quantos foram de fato
+    periciados (`n_periciados`), além da decomposição econômica de `resultado_economico`.
+    """
+    valor = _valor_reclamado_numerico(X)
+    acima = np.nonzero(valor > limiar)[0]
+    ordem = acima[np.argsort(-valor[acima], kind="mergesort")]
+    periciados = ordem[: min(int(k), len(ordem))]
+
+    resultado = resultado_economico(y, periciados)
+    resultado["n_acima_limiar"] = int(acima.size)
+    resultado["limiar"] = float(limiar)
+    return resultado
+
+
+def pontos_de_decisao_k(
+    tabela: pd.DataFrame,
+    resumo: dict[str, float | int],
+    capacidade: int = CAPACIDADE_MENSAL,
+) -> list[tuple[int, float, str]]:
+    """Os pontos de decisão sobre a curva `Resultado(k)`, com o valor em reais.
+
+    Ordem: **capacidade de hoje**, **corte teórico** `p*`, **ótimo empírico** e o
+    **último `k` ainda lucrativo**. Os três últimos saem do `resumo` da curva —
+    nada digitado à mão.
+    """
+    rotulados = [
+        (int(capacidade), "capacidade hoje"),
+        (int(resumo["k_corte_teorico"]), "corte teórico p*"),
+        (int(resumo["k_otimo_empirico"]), "ótimo empírico"),
+        (int(resumo["k_maximo_ainda_lucrativo"]), "último k lucrativo"),
+    ]
+    return [
+        (k, float(tabela.loc[tabela["k"] == k, "resultado_liquido"].iloc[0]), rotulo)
+        for k, rotulo in rotulados
+    ]
+
+
+def salvar_curva_decisao(
+    tabela: pd.DataFrame,
+    pontos: list[tuple[int, float, str]],
+    caminho: Path | str | None = None,
+) -> Path:
+    """Curva `Resultado(k)` do campeão no mês de teste, com os pontos de decisão anotados."""
+    if caminho is None:
+        caminho = PASTA_FIGURAS / "05_curva_decisao.png"
+    caminho = Path(caminho)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+
+    figura, eixo = plt.subplots(figsize=(11, 6))
+    eixo.plot(
+        tabela["k"],
+        tabela["resultado_liquido"] / 1000.0,
+        color="#1f4e79",
+        lw=2,
+        label="Resultado líquido (R$ mil)",
+    )
+    eixo.axhline(0.0, color="0.4", lw=1)
+
+    cores = ["#c62828", "#f9a825", "#2e7d32", "#6a1b9a"]
+    for (k, valor, rotulo), cor in zip(pontos, cores, strict=True):
+        eixo.axvline(k, color=cor, ls="--", lw=1.4)
+        eixo.plot([k], [valor / 1000.0], marker="o", color=cor, ms=6)
+        eixo.annotate(
+            f"{rotulo}\nk={k} · R$ {valor:,.0f}",
+            xy=(k, valor / 1000.0),
+            xytext=(6, 10 if valor >= 0 else -30),
+            textcoords="offset points",
+            color=cor,
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    eixo.set_xlabel("k — sinistros periciados, por ordem decrescente de risco")
+    eixo.set_ylabel("Resultado líquido (R$ mil)")
+    eixo.set_title("Fase 5 — curva Resultado(k) do campeão no mês de teste e os pontos de decisão")
+    eixo.grid(alpha=0.3)
+    eixo.legend(loc="lower left")
+    figura.tight_layout()
+    figura.savefig(caminho, dpi=150)
+    plt.close(figura)
+    return caminho
