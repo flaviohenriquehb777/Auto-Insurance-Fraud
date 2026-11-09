@@ -46,6 +46,7 @@ if str(RAIZ / "src") not in sys.path:
     sys.path.insert(0, str(RAIZ / "src"))
 
 from quilha.avaliacao import (
+    LIMIAR_CORTE_TEORICO,
     N_REAMOSTRAGENS_BOOTSTRAP,
     PERGUNTA_DE_DECISAO,
     PERICIAS_POR_PERITO,
@@ -1242,3 +1243,133 @@ print(f"  Tabela salva em {CAMINHO_SHAP_LOCAL.relative_to(RAIZ)}")
 # morto (18º de 18; 243× menor que a nº 1) e **mantido** por ser derivado da data. As explicações
 # locais do topo da fila são **legíveis** (faixa de valor reclamado, tipo de sinistro, dias de
 # apólice), mas de estabilidade **parcial** — o contrato do app exige **fundo SHAP congelado**.
+
+# %% [markdown]
+# ## Parte 7 — Revisão do processo e próximos passos (CRISP-DM 5.2 e 5.3)
+#
+# Avaliar não é só medir: é **revisar como se chegou aqui** (5.2) e **decidir o que fazer depois**
+# (5.3). Esta parte fecha a fase com **uma** decisão, os gatilhos que a manteriam de pé e a frase
+# que a resume.
+
+# %%
+# =============================================================================
+# Parte 7 — Fatos da Fase 5: o que sustenta a decisão (consolidado dos artefatos)
+# =============================================================================
+# Lê os artefatos já gravados e recomputa o ponto de quebra — nada é digitado à mão.
+backtest_lido = pd.read_csv(PASTA_TABELAS / "avaliacao_backtest.csv")
+pivot_backtest = backtest_lido.pivot(index="janela", columns="politica", values="resultado_k")
+diferenca_por_janela = pivot_backtest["campeao"] - pivot_backtest["regra_atual"]
+
+bootstrap_lido = pd.read_csv(PASTA_TABELAS / "avaliacao_bootstrap.csv").set_index("metrica")
+linha_diferenca = bootstrap_lido.loc["diferenca"]
+
+sensibilidade_lida = pd.read_csv(PASTA_TABELAS / "avaliacao_sensibilidade.csv")
+taxa_equilibrio = taxa_fraude_de_break_even(y_teste, escore_campeao_teste, k=CAPACIDADE_MENSAL)
+
+print("FATOS DA FASE 5 (consolidado dos artefatos)")
+print("  FORA DA AMOSTRA (4 janelas walk-forward, mai–ago):")
+print(f"    campeão               R$ {pivot_backtest['campeao'].mean():>14,.2f}  "
+      f"± R$ {pivot_backtest['campeao'].std():>12,.2f}")
+print(f"    regra atual           R$ {pivot_backtest['regra_atual'].mean():>14,.2f}  "
+      f"± R$ {pivot_backtest['regra_atual'].std():>12,.2f}")
+print(f"    campeão − regra       R$ {diferenca_por_janela.mean():>14,.2f}  "
+      f"± R$ {diferenca_por_janela.std():>12,.2f}")
+print(f"    pior janela da diferença: R$ {diferenca_por_janela.min():,.2f}")
+print()
+print("  INCERTEZA (bootstrap pareado, 2.000 reamostragens):")
+print(f"    campeão − regra       R$ {linha_diferenca['media']:>14,.2f}  "
+      f"IC95% [{linha_diferenca['ic_inferior']:,.0f}; {linha_diferenca['ic_superior']:,.0f}]")
+print(f"    IC exclui o zero? {'SIM' if linha_diferenca['ic_inferior'] > 0 else 'NÃO'}")
+print()
+print("  ROBUSTEZ ECONÔMICA (grade combinada):")
+print(f"    células: {len(sensibilidade_lida)} | ganho de R$ "
+      f"{sensibilidade_lida['ganho'].min():,.0f} a R$ {sensibilidade_lida['ganho'].max():,.0f}")
+print(f"    células em que o campeão NÃO vence a regra: "
+      f"{int((~sensibilidade_lida['vence_regra']).sum())} de {len(sensibilidade_lida)}")
+print()
+print(f"  PONTO DE QUEBRA: fraude de equilíbrio {taxa_equilibrio:.4%} "
+      f"(piso absoluto {LIMIAR_CORTE_TEORICO:.4%})")
+
+# %% [markdown]
+# ### 5.2 — Revisão do processo (o que funcionou, o que custou caro, o que agosto ensinou)
+#
+# **Funcionou (com evidência).**
+# 1. **Pipeline dentro do fold, sem vazamento.** O backtest *re-ajusta* o campeão a cada janela com
+#    `clone`, então nenhuma estatística de teste entrou no treino — foi o que permitiu estimar fora
+#    da amostra.
+# 2. **`scale_pos_weight=1` preservou a calibração.** O corte teórico `700/21.700 = 3,2258%` da
+#    Fase 1 reapareceu intacto na Parte 4/5 — sinal de que o escore continua sendo probabilidade,
+#    não só ranking.
+# 3. **A decisão não dependeu do mês.** O ganho sobreviveu em 4 janelas **e** ao IC 95% do bootstrap
+#    (exclui o zero) **e** a 100 cenários econômicos (0 perdas) — três provas independentes.
+#
+# **Custou caro (com evidência).**
+# 1. **O espelhamento run a run no DagsHub.** Registrar cada configuração no remoto degradou de
+#    ~21s para ~206s por configuração e obrigou a publicar **só as 4 famílias vencedoras** — a
+#    plataforma fica para o fim, não no laço de busca.
+# 2. **A run histórica da Regra Atual não persistiu os escores.** A linha da regra teve de ser
+#    **revalidada** na Fase 4 (mesmo `StratifiedKFold`, `SEED=42`), porque a referência não era
+#    reprodutível do que estava salvo.
+# 3. **O bootstrap re-executa a política 2.000 vezes.** É o preço da incerteza pareada — pesado,
+#    porém foi o que provou que o ganho não é ruído.
+#
+# **O que a incidência de agosto nos ensinou (método).** Não se usa a **única janela disponível**
+# tanto para *escolher* quanto para *reportar*: seria seleção e prova no mesmo dado. Por isso a
+# estimativa que carrega a decisão é o **backtest walk-forward** (4 janelas); o holdout de agosto é
+# **descritivo** e serve para explicar a política, não para prová-la.
+
+# %% [markdown]
+# ### Lições reaproveitáveis (a parte genérica, para o próximo projeto)
+#
+# 1. **Estime fora da amostra antes de reportar.** Um holdout único não é prova; use janelas móveis.
+# 2. **Precifique a escolha ética em reais.** "Empate técnico" é resposta válida — e frequentemente
+#    a mais sênior.
+# 3. **Sensibilidade de um fator por vez + grade combinada.** Robustez se mostra varrendo o espaço,
+#    não escolhendo um ponto.
+# 4. **Break-even como número de guarda.** "Quanto o custo pode subir antes de eu perder?" deve ter
+#    resposta em reais.
+# 5. **Bootstrap pareado para a decisão** — teste a **diferença**, não cada política isolada.
+# 6. **Congele o fundo de explicabilidade.** Explicação que muda a cada execução não serve ao analista.
+# 7. **Triagem de disparidade com piso de amostra; achado não é veredito.**
+# 8. **O modelo ordena; a política decide; a capacidade é restrição de negócio.**
+
+# %% [markdown]
+# ### 5.3 — Próximos passos: **implantar**, com condições
+#
+# O ganho sobreviveu às três provas — IC 95% (exclui zero), backtest (4 janelas positivas) e
+# sensibilidade (0/100 cenários perdem). Então a decisão é **implantar**, mas com condições claras:
+#
+# 1. **Manter 30 peritos** (900 perícias/mês). O platô de valor está em ~48 peritos, mas o ganho
+#    marginal já é pequeno e a Fase 5 mostrou que além de 55 peritos a política **destrói** valor.
+# 2. **Fila de 900 no escore do campeão**, com **revisão humana** obrigatória nos casos do topo de
+#    maior valor — o analista vê escore, posição, 3 sinais SHAP (fundo congelado) e texto curto.
+# 3. **Gatilhos e circuit breaker ativos desde o dia 1** (quadro abaixo).
+# 4. **Reavaliação trimestral.** Ampliar a equipe só se a Precisão@900 seguir com folga acima do piso.
+
+# %% [markdown]
+# ### Plano de monitoramento (especificação para a Fase 6 — não implementação)
+#
+# | Métrica mensal | Gatilho de alerta | Ação |
+# |---|---|---|
+# | **Precisão@900** | < **3,2258%** (o piso) por **2 meses seguidos** | Recalibrar; se persistir, re-treinar |
+# | **Resultado@900 realizado** | < **R$ 0** | **Circuit breaker:** fila volta à regra anterior |
+# | **Taxa de fraude do fluxo** | < **0,35%** (o equilíbrio medido é 0,3480%) | Revisar a política com o comitê |
+# | **% de `boletim_ocorrencia` em branco** | > **10%** (baseline 4,83%) | Alerta; > **20%** aciona a contingência da Parte 6 |
+# | **PSI das features principais** | > **0,25** | Re-treinar (deriva de população) |
+# | **Distribuição do escore** | share no top-900 desviando > 20% do histórico | Investigar deriva antes de periciar |
+#
+# - **Circuit breaker:** se `Resultado@900` realizado ficar **negativo** ou a Precisão@900 cair abaixo
+#   do piso por **dois meses consecutivos**, a fila **volta automaticamente** à regra anterior de
+#   R$ 50 mil, sem depender de aprovação — religar exige parecer do comitê.
+# - **Cadência:** recalibração **trimestral**; re-treino **semestral** (ou por gatilho).
+# - **Quem aprova:** o **comitê de risco** (dono da decisão) e a liderança de sinistros; o
+#   analista-chefe valida a legibilidade das explicações antes de cada liberação.
+
+# %% [markdown]
+# ### Frase de decisão da Fase 5
+#
+# **Implantar** a política de 900 perícias/mês no escore do campeão: fora da amostra ela rende
+# **R$ 4,33 milhões/mês** sobre a regra de R$ 50 mil (bootstrap: **R$ 4,09M**, IC95%
+# **[R$ 3,54M; R$ 4,67M]**, exclui o zero; **0 de 100** cenários perdem), e a decisão só é invalidada
+# se a **Precisão@900 ficar abaixo de 3,2258% por dois meses seguidos** — quando a fila volta à
+# regra anterior automaticamente.

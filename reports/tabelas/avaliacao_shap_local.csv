@@ -1,4 +1,4 @@
 posicao_fila,indice_holdout,escore,desfecho,sinal_1,sinal_2,sinal_3
-1,11273,0.9560838341712952,fraude,faixa_valor_reclamado (+0.2098),tipo_sinistro (+0.1715),razao_reclamado_fipe (+0.1692)
-2,2550,0.9286777973175049,fraude,dias_de_apolice (+0.1811),tipo_sinistro (+0.1770),faixa_valor_reclamado (+0.1660)
-3,10519,0.9215794801712036,fraude,razao_reclamado_fipe (+0.1706),tipo_sinistro (+0.1698),faixa_valor_reclamado (+0.1574)
+1,11273,0.9560838341712952,fraude,tipo_sinistro (+0.2012),faixa_valor_reclamado (+0.1793),razao_reclamado_fipe (+0.1647)
+2,2550,0.9286777973175049,fraude,tipo_sinistro (+0.1621),faixa_valor_reclamado (+0.1519),razao_reclamado_fipe (+0.1414)
+3,10519,0.9215794801712036,fraude,razao_reclamado_fipe (+0.1906),faixa_valor_reclamado (+0.1839),tipo_sinistro (+0.1620)
