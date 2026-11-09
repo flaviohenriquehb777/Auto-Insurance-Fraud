@@ -57,6 +57,18 @@ GRADE_CUSTO_FRAUDE_PAGA: tuple[float, ...] = (10_000.0, 15_000.0, 21_700.0, 30_0
 GRADE_CUSTO_PERICIA: tuple[float, ...] = (500.0, 700.0, 1_000.0, 1_500.0)
 GRADE_CAPACIDADE: tuple[int, ...] = (600, 900, 1_200, 1_800, 2_400)
 
+# Faixas etárias da triagem de disparidade (Parte 6). Intervalos fechados: (rótulo, mín, máx).
+FAIXAS_IDADE_DISPARIDADE: tuple[tuple[str, int, int], ...] = (
+    ("18 a 29", 18, 29),
+    ("30 a 44", 30, 44),
+    ("45 a 59", 45, 59),
+    ("60 ou mais", 60, 200),
+)
+
+# Colunas usadas na triagem de disparidade. Os nomes são os do chamado cru.
+COLUNA_IDADE_DISPARIDADE = "idade_segurado"
+COLUNA_UF_DISPARIDADE = "uf"
+
 # Pergunta que encerra a fase: a recomendação só é afirmada se sobreviver a ela.
 PERGUNTA_DE_DECISAO = (
     "A política baseada no escore do campeão supera a regra atual de R$ 50 mil com as "
@@ -913,3 +925,80 @@ def taxa_fraude_de_break_even(
         return float("inf")
     n_alvo = custo_pericia * corte / (custo_fraude_paga * cobertura)
     return float(n_alvo / (n_negativos + n_alvo))
+
+
+# ---------------------------------------------------------------------------
+# Parte 6 — Triagem de disparidade da fila periciada
+# ---------------------------------------------------------------------------
+def _faixa_idade(
+    serie: pd.Series,
+    faixas: tuple[tuple[str, int, int], ...] = FAIXAS_IDADE_DISPARIDADE,
+) -> pd.Series:
+    """Discretiza a idade em faixas legíveis; idade ausente vira 'não informado'."""
+    idade = pd.to_numeric(serie, errors="coerce")
+    rotulo = pd.Series("não informado", index=serie.index, dtype=object)
+    for nome, minimo, maximo in faixas:
+        dentro = idade.between(minimo, maximo).fillna(False)
+        rotulo[dentro] = nome
+    return rotulo
+
+
+def triagem_disparidade(
+    y_true,
+    escore,
+    X_bruto: pd.DataFrame,
+    k: int = CAPACIDADE_MENSAL,
+    coluna_idade: str = COLUNA_IDADE_DISPARIDADE,
+    coluna_uf: str = COLUNA_UF_DISPARIDADE,
+) -> pd.DataFrame:
+    """Triagem de disparidade da fila periciada — sinal para revisão, não veredito legal.
+
+    Para cada grupo (faixa de idade e UF), mede a **taxa de seleção** (fração do grupo
+    que entra nas `k` perícias) e a **precisão@k** do grupo (fraudes entre os periciados).
+    A leitura de justiça é a razão entre a taxa de seleção do grupo e a taxa média: um
+    grupo selecionado muito acima do resto concentra a fila e merece revisão humana.
+
+    `X_bruto` é o chamado **cru** (antes do preparo), porque `idade_segurado` e `uf` vivem
+    nas colunas originais. Devolve uma linha por `(dimensao, grupo)`.
+    """
+    y = np.asarray(y_true, dtype=int)
+    n = len(y)
+    corte = min(k, n)
+    selecao = np.argsort(-np.asarray(escore, dtype=float), kind="mergesort")[:corte]
+    marca_selecao = np.zeros(n, dtype=bool)
+    marca_selecao[selecao] = True
+    taxa_selecao_geral = corte / n if n else 0.0
+
+    dimensoes = {
+        "idade": _faixa_idade(X_bruto[coluna_idade]),
+        "uf": X_bruto[coluna_uf].astype("string").fillna("não informado"),
+    }
+
+    linhas: list[dict] = []
+    for dimensao, grupos in dimensoes.items():
+        for grupo in sorted(grupos.unique(), key=str):
+            no_grupo = (grupos == grupo).to_numpy()
+            n_grupo = int(no_grupo.sum())
+            if n_grupo == 0:
+                continue
+            n_selecionado = int((no_grupo & marca_selecao).sum())
+            tp = int(y[no_grupo & marca_selecao].sum())
+            n_fraudes = int(y[no_grupo].sum())
+            taxa_selecao = n_selecionado / n_grupo
+            precisao = (tp / n_selecionado) if n_selecionado else 0.0
+            taxa_fraude_grupo = n_fraudes / n_grupo
+            razao_selecao = taxa_selecao / taxa_selecao_geral if taxa_selecao_geral else 0.0
+            linhas.append(
+                {
+                    "dimensao": dimensao,
+                    "grupo": str(grupo),
+                    "n_grupo": n_grupo,
+                    "n_selecionado": n_selecionado,
+                    "taxa_selecao": taxa_selecao,
+                    "razao_selecao": razao_selecao,
+                    "precisao": precisao,
+                    "taxa_fraude_grupo": taxa_fraude_grupo,
+                    "lift": precisao / taxa_fraude_grupo if taxa_fraude_grupo else 0.0,
+                }
+            )
+    return pd.DataFrame(linhas)

@@ -28,6 +28,7 @@ import sys
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
+from xgboost import XGBClassifier
 
 SEED = 42
 
@@ -76,8 +77,10 @@ from quilha.avaliacao import (
     sensibilidade_taxa_fraude,
     taxa_fraude_de_break_even,
     tp_acumulado_por_k,
+    triagem_disparidade,
 )
 from quilha.dados import carregar_base_crua
+from quilha.explicacao import explicar_sinistro
 from quilha.modelagem import (
     CAPACIDADE_MENSAL,
     CUSTO_FRAUDE_PAGA,
@@ -89,6 +92,7 @@ from quilha.modelagem import (
     calcular_metricas_holdout,
     carregar_treino_teste,
     curva_resultado_k,
+    importancia_shap,
     separar_entrada_alvo,
 )
 from quilha.pipeline import CAMINHO_PIPELINE, carregar_pipeline, construir_pipeline
@@ -935,3 +939,306 @@ print("    - volume fora da faixa de 9.000 a 18.000 sinistros/mês (pico de alag
 # Como a taxa base (2,47%) já está abaixo do piso (3,2258%), quem sustenta a política é o *lift* de
 # ~9× no topo da fila; o resultado zera só se a taxa de fraude cair para perto de **0,36%** — quase
 # 7× o colchão atual. É esse o número que vira gatilho de monitoramento na Fase 6.
+
+# %% [markdown]
+# ## Parte 6 — Aceitabilidade, risco e explicabilidade
+#
+# O case cobra, na Pergunta 1, o que se pode e o que não se deve usar para decidir quem é periciado.
+# Aqui a decisão da Fase 4 (`usar uf` e `idade_segurado`) é **reprocessada sob a ótica do negócio**:
+# não basta dizer "a métrica piora pouco" — o comitê tem de ver o **preço em reais**. Depois vêm a
+# triagem de disparidade, a auditoria do `boletim_ocorrencia` (feature SHAP nº 1 e único campo com
+# branco), a confirmação do atributo morto (`fim_de_semana`), a explicação que o analista usa e o
+# registro de riscos.
+
+# %%
+# =============================================================================
+# Parte 6 — Preço em reais de não usar `uf` e `idade_segurado`
+# =============================================================================
+# Reajusta o CAMPEÃO sem as duas colunas, no mesmo protocolo (treino abr–jul, teste ago,
+# SEED=42) e mede o Resultado@900 resultante. É o número que o comitê precisa ver.
+COLUNAS_ABLADAS = ("uf", "idade_segurado")
+
+pipeline_sem_idade_uf = construir_pipeline(
+    modelo=XGBClassifier(random_state=SEED, eval_metric="logloss", n_jobs=1, **ESPERADO_FASE4),
+    colunas_excluidas=COLUNAS_ABLADAS,
+)
+pipeline_sem_idade_uf.fit(X_treino, y_treino)
+prob_sem_idade_uf = pipeline_sem_idade_uf.predict_proba(X_teste)[:, 1]
+metricas_sem_idade_uf = calcular_metricas_holdout(y_teste, prob_sem_idade_uf)
+
+resultado_com_uf_idade = float(REFERENCIA_FASE4["resultado_900"])
+resultado_sem_uf_idade = float(metricas_sem_idade_uf["resultado_900"])
+preco_de_remover = resultado_com_uf_idade - resultado_sem_uf_idade
+
+tabela_ablacao = pd.DataFrame(
+    [
+        {
+            "cenario": "com idade e UF (campeão)",
+            "n_features": len(FEATURES),
+            "roc_auc": float(metricas_fumaca["roc_auc"]),
+            "pr_auc": float(metricas_fumaca["pr_auc"]),
+            "tp_900": int(metricas_fumaca["tp_900"]),
+            "precisao_900": float(metricas_fumaca["precisao_900"]),
+            "resultado_900": resultado_com_uf_idade,
+        },
+        {
+            "cenario": "sem idade e UF (ablação)",
+            "n_features": len(FEATURES) - len(COLUNAS_ABLADAS),
+            "roc_auc": float(metricas_sem_idade_uf["roc_auc"]),
+            "pr_auc": float(metricas_sem_idade_uf["pr_auc"]),
+            "tp_900": int(metricas_sem_idade_uf["tp_900"]),
+            "precisao_900": float(metricas_sem_idade_uf["precisao_900"]),
+            "resultado_900": resultado_sem_uf_idade,
+        },
+    ]
+)
+
+print("ABLAÇÃO DE `uf` + `idade_segurado` NO CAMPEÃO (holdout de agosto, k=900)")
+print(tabela_ablacao.to_string(index=False))
+print()
+print(f"  preço em reais de NÃO usar as duas colunas: R$ {preco_de_remover:,.2f} / mês")
+print(
+    f"  ROC AUC: {metricas_fumaca['roc_auc']:.6f} -> {metricas_sem_idade_uf['roc_auc']:.6f} "
+    f"({metricas_sem_idade_uf['roc_auc'] - metricas_fumaca['roc_auc']:+.6f})"
+)
+print(
+    f"  PR AUC : {metricas_fumaca['pr_auc']:.6f} -> {metricas_sem_idade_uf['pr_auc']:.6f} "
+    f"({metricas_sem_idade_uf['pr_auc'] - metricas_fumaca['pr_auc']:+.6f})"
+)
+print(
+    "  conferência Fase 4: ROC 0,936597 -> 0,937166 | PR 0,538556 -> 0,533792 "
+    "(reprodutibilidade da ablação)."
+)
+CAMINHO_ABLACAO = PASTA_TABELAS / "avaliacao_ablacao.csv"
+tabela_ablacao.to_csv(CAMINHO_ABLACAO, index=False)
+print(f"  Tabela salva em {CAMINHO_ABLACAO.relative_to(RAIZ)}")
+
+# %% [markdown]
+# **Posição fechada — `idade_segurado` e `uf` (campo do Quadro de Respostas).**
+#
+# *Usar.* O preço em reais de **não** usá-las é **R$ −43.400/mês** — isto é, a remoção *ganha*
+# R$ 43.400 no mês, um empate técnico: vale 2 sinistros em 900 (~0,9% do desvio do bootstrap da
+# Parte 5). Em contrapartida, o **PR AUC cai** (0,5386 → 0,5338), que é a métrica que governa a
+# ordenação. Como os dois efeitos são indistinguíveis de zero **e** a Fase 4 já aprovou o conjunto
+# com as duas colunas, a decisão é **manter** — remover seria re-treino sem ganho demonstrado.
+#
+# *Contraponto honesto para o comitê.* Se a prioridade for **governança** (idade e UF são proxies
+# de características pessoais), a remoção é defensável: **custa estatisticamente nada** neste
+# holdout. A escolha é de negócio, não técnica — e o número está na mesa.
+
+# %%
+# =============================================================================
+# Parte 6 — Triagem de disparidade da fila periciada (por faixa de idade e por UF)
+# =============================================================================
+# Sinal para revisão humana, NÃO veredito legal: mede quem a fila de 900 perícias
+# concentra. `X_teste` é o chamado cru, onde `idade_segurado` e `uf` ainda existem.
+tabela_disparidade = triagem_disparidade(
+    y_teste, escore_campeao_teste, X_teste, k=CAPACIDADE_MENSAL
+)
+
+disparidade_idade = tabela_disparidade[tabela_disparidade["dimensao"] == "idade"]
+disparidade_uf = tabela_disparidade[tabela_disparidade["dimensao"] == "uf"].sort_values(
+    "taxa_selecao", ascending=False
+)
+COLUNAS_DISPARIDADE = [
+    "grupo",
+    "n_grupo",
+    "n_selecionado",
+    "taxa_selecao",
+    "razao_selecao",
+    "precisao",
+    "taxa_fraude_grupo",
+    "lift",
+]
+
+print("TRIAGEM DE DISPARIDADE — por faixa de idade (k=900)")
+print(disparidade_idade[COLUNAS_DISPARIDADE].to_string(index=False))
+print()
+print("TRIAGEM DE DISPARIDADE — por UF, ordenada pela taxa de seleção")
+print(disparidade_uf[COLUNAS_DISPARIDADE].to_string(index=False))
+print()
+print("LEITURA DOS EXTREMOS (faixa de idade)")
+faixa_menos = disparidade_idade.loc[disparidade_idade["taxa_selecao"].idxmin()]
+faixa_mais = disparidade_idade.loc[disparidade_idade["taxa_selecao"].idxmax()]
+print(
+    f"  menos selecionada: {faixa_menos['grupo']} "
+    f"(razão {faixa_menos['razao_selecao']:.2f}× a média)"
+)
+print(
+    f"  mais selecionada : {faixa_mais['grupo']} "
+    f"(razão {faixa_mais['razao_selecao']:.2f}× a média)"
+)
+
+CAMINHO_DISPARIDADE = PASTA_TABELAS / "avaliacao_disparidade.csv"
+tabela_disparidade.to_csv(CAMINHO_DISPARIDADE, index=False)
+print()
+print(f"  Tabela salva em {CAMINHO_DISPARIDADE.relative_to(RAIZ)}")
+print("  NOTA: por IDADE a fila é plana (razão de seleção de 0,92× a 1,18× a média) — a precisão")
+print("        sobe com a idade (19,7% nos 18–29 contra 30,2% nos 60+), mas a seleção não")
+print("        se concentra. As UFs com taxa extrema têm volume pequeno (SE n=59, AP/RR n≤24):")
+print("        triagem com n baixo é ruído — daí o piso de amostra na rotina trimestral.")
+
+# %%
+# =============================================================================
+# Parte 6 — Auditoria do `boletim_ocorrencia`: quanto custa perder o campo
+# =============================================================================
+# É a feature SHAP nº 1 e a única coluna com branco (4,83%). Se o campo deixar de
+# ser preenchido na abertura, a política perde este tanto — o número sustenta a
+# regra de contingência.
+COLUNAS_SEM_BOLETIM = ("boletim_ocorrencia",)
+
+pipeline_sem_boletim = construir_pipeline(
+    modelo=XGBClassifier(random_state=SEED, eval_metric="logloss", n_jobs=1, **ESPERADO_FASE4),
+    colunas_excluidas=COLUNAS_SEM_BOLETIM,
+)
+pipeline_sem_boletim.fit(X_treino, y_treino)
+prob_sem_boletim = pipeline_sem_boletim.predict_proba(X_teste)[:, 1]
+metricas_sem_boletim = calcular_metricas_holdout(y_teste, prob_sem_boletim)
+resultado_sem_boletim = float(metricas_sem_boletim["resultado_900"])
+perda_sem_boletim = resultado_com_uf_idade - resultado_sem_boletim
+
+print("AUDITORIA DO `boletim_ocorrencia` (holdout de agosto, k=900)")
+print(f"  com boletim : TP@900={int(metricas_fumaca['tp_900'])} | "
+      f"precisão@900={metricas_fumaca['precisao_900']:.4%} | "
+      f"Resultado@900 = R$ {resultado_com_uf_idade:,.2f}")
+print(f"  sem boletim : TP@900={int(metricas_sem_boletim['tp_900'])} | "
+      f"precisão@900={metricas_sem_boletim['precisao_900']:.4%} | "
+      f"Resultado@900 = R$ {resultado_sem_boletim:,.2f}")
+print(f"  perda se o campo sumir: R$ {perda_sem_boletim:,.2f} / mês "
+      f"({perda_sem_boletim / resultado_com_uf_idade:.2%} do resultado)")
+print()
+print("  apoio Fase 3 (modelo de árvore, 5 sementes): sem boletim = R$ 3.206.560/mês")
+print("  REGRA DE CONTINGÊNCIA (se o boletim deixar de ser preenchido na abertura):")
+print("    1. o modelo perde ~9% do valor (R$ 325.500/mês), mas SEGUE muito acima da regra")
+print("       atual (que tem resultado negativo) — a política não desaba;")
+print("    2. a fila continua no escore, com o gatilho de reavaliação se a precisão@900 cair")
+print("       abaixo do piso de 3,2258% por dois meses;")
+print("    3. o campo em branco vira categoria 'Não informado' — nunca imputação — e o")
+print("       indicador de branco no fluxo entra no monitoramento (Fase 6).")
+
+# %%
+# =============================================================================
+# Parte 6 — Confirmação do atributo morto `fim_de_semana` (importância SHAP)
+# =============================================================================
+amostra_shap = X_teste.sample(n=300, random_state=SEED)
+importancia = importancia_shap(pipeline, X_treino, amostra_shap, semente=SEED)
+posicao_fim_de_semana = list(importancia.index).index("fim_de_semana") + 1
+razao_morto = importancia.iloc[0] / importancia["fim_de_semana"]
+
+print("IMPORTÂNCIA SHAP (média absoluta agregada por feature original, 300 sinistros)")
+print(importancia.head(5).to_string())
+print()
+print(f"  fim_de_semana: {posicao_fim_de_semana}º de {len(importancia)} | "
+      f"importância {importancia['fim_de_semana']:.6f}")
+print(f"  razão vs. 1ª feature ({importancia.index[0]}): {razao_morto:,.0f}× menor")
+print("  DECISÃO: manter. É derivada da data (não é campo digitado), o custo é zero e")
+print("           removê-la não muda o resultado — mexer no conjunto aprovado seria retrabalho.")
+
+CAMINHO_SHAP_IMPORTANCIA = PASTA_TABELAS / "avaliacao_shap_importancia.csv"
+pd.DataFrame(
+    {"feature": importancia.index, "importancia_shap": importancia.to_numpy()}
+).to_csv(CAMINHO_SHAP_IMPORTANCIA, index=False)
+print(f"  Tabela salva em {CAMINHO_SHAP_IMPORTANCIA.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 6 — Explicabilidade que o analista usa (SHAP local no topo da fila)
+# =============================================================================
+# O analista precisa entender POR QUE o sinistro está na fila antes de mandar o perito.
+# Mede legibilidade (3 sinais principais por sinistro) e estabilidade (os sinais mudam
+# se o fundo do SHAP mudar?).
+ordem_fila = np.argsort(-escore_campeao_teste, kind="mergesort")
+topo = ordem_fila[:3]
+
+contribuicoes_topo: list[tuple[int, int, pd.Series]] = []
+linhas_local: list[dict] = []
+for posicao, indice in enumerate(topo, start=1):
+    contribuicoes = explicar_sinistro(
+        pipeline, X_teste.iloc[[indice]], X_treino, n_fundo=100, semente=SEED
+    )
+    contribuicoes_topo.append((posicao, int(indice), contribuicoes))
+    principais = contribuicoes.head(3)
+    linhas_local.append(
+        {
+            "posicao_fila": posicao,
+            "indice_holdout": int(indice),
+            "escore": float(escore_campeao_teste[indice]),
+            "desfecho": "fraude" if int(y_teste.iloc[indice]) == 1 else "legítimo",
+            "sinal_1": f"{principais.index[0]} ({principais.iloc[0]:+.4f})",
+            "sinal_2": f"{principais.index[1]} ({principais.iloc[1]:+.4f})",
+            "sinal_3": f"{principais.index[2]} ({principais.iloc[2]:+.4f})",
+        }
+    )
+
+tabela_local = pd.DataFrame(linhas_local)
+print("EXPLICAÇÕES SHAP LOCAIS — topo da fila (posições 1 a 3)")
+print(tabela_local.to_string(index=False))
+print()
+
+# Estabilidade: recomputa o top-3 com outro fundo (200 linhas, semente 7) e compara o conjunto.
+linhas_estabilidade: list[dict] = []
+for posicao, indice, contribuicoes in contribuicoes_topo:
+    alternativa = explicar_sinistro(
+        pipeline, X_teste.iloc[[indice]], X_treino, n_fundo=200, semente=7
+    )
+    linhas_estabilidade.append(
+        {
+            "posicao_fila": posicao,
+            "top3_estavel": set(contribuicoes.head(3).index) == set(alternativa.head(3).index),
+        }
+    )
+tabela_estabilidade = pd.DataFrame(linhas_estabilidade)
+print("ESTABILIDADE DOS SINAIS (fundo 100/seed 42 vs. fundo 200/seed 7)")
+print(tabela_estabilidade.to_string(index=False))
+estaveis = int(tabela_estabilidade["top3_estavel"].sum())
+print(f"  {estaveis} de {len(tabela_estabilidade)} posições mantêm o MESMO conjunto de 3 sinais")
+print("  LEITURA: os sinais são LEGÍVEIS (faixa_valor_reclamado, tipo_sinistro, dias_de_apolice);")
+print("           a estabilidade é PARCIAL — a ordem/pertinência depende do fundo do SHAP. Por isso")
+print("           o contrato exige fundo CONGELADO no app, para a explicação ser reprodutível.")
+
+CAMINHO_SHAP_LOCAL = PASTA_TABELAS / "avaliacao_shap_local.csv"
+tabela_local.to_csv(CAMINHO_SHAP_LOCAL, index=False)
+print()
+print(f"  Tabela salva em {CAMINHO_SHAP_LOCAL.relative_to(RAIZ)}")
+
+# %% [markdown]
+# **Contrato de interface para o app (Fase 6 — especificação, não implementação).** Por sinistro
+# periciado, o app deve mostrar, no mínimo:
+#
+# 1. **escore** do campeão (probabilidade de fraude) e a **posição na fila** (ex.: "37º de 900");
+# 2. os **3 sinais SHAP principais**, por nome de negócio (não o nome técnico da coluna), com o
+#    sentido do sinal (empurra para fraude ou para legítimo);
+# 3. um **texto curto** de apoio ("por que este chamado está aqui"), montado a partir dos sinais;
+# 4. o **desfecho esperado** e a ação (encaminhar ao perito / devolver ao fluxo normal).
+#
+# O objetivo é que o analista entenda o chamado antes de acionar o perito — explicação que não
+# muda a decisão não serve. Como a estabilidade medida é **parcial**, o app deve usar um
+# **fundo SHAP congelado** (o mesmo do treino), para que o mesmo sinistro mostre sempre os
+# mesmos 3 sinais.
+
+# %% [markdown]
+# ## Registro de riscos
+#
+# | Risco | Severidade | Mitigação |
+# |---|---|---|
+# | Erro de calibração em produção (escore deixa de casar com a frequência real) | Alta | Brier e curva de calibração mensais; recalibração se o desvio passar do IC do bootstrap |
+# | Degradação temporal (conceito/população muda) | Alta | Backtest walk-forward trimestral; re-treino se a Precisão@900 cair abaixo do piso por 2 meses |
+# | Queda de prevalência abaixo do piso | Alta | Gatilho em **0,35%** de taxa de fraude do mês (o break-even medido é 0,3480%) |
+# | Dependência do `boletim_ocorrencia` | Média | O modelo sem o campo ainda supera a regra; campo em branco vira categoria própria e entra no monitoramento |
+# | Concentração por grupo (idade/UF) | Média | Triagem trimestral com **piso de amostra** (UF com n alto); revisão humana quando a razão de seleção de um grupo grande fugir da média |
+# | Custo real da perícia acima do orçado (R$ 700) | Média | Break-even: a política suporta até **R$ 3.134,33** por perícia antes de zerar (razão 4,478:1) |
+# | Atraso do cliente honesto (falso positivo) | Baixa | **Já está dentro** do custo de R$ 700 da perícia — não contar de novo |
+
+# %% [markdown]
+# **Leitura da Parte 6.** A decisão de usar `uf` e `idade_segurado` sai **precificada**: removê-las
+# vale **R$ 43.400/mês** — um empate técnico (~0,9% do desvio do bootstrap), com PR AUC pior sem
+# elas; por isso a posição é **manter**, ressalvando ao comitê que a remoção por governança custaria
+# estatisticamente nada. A **triagem de disparidade** mostra que a fila é **plana por idade**
+# (razão de seleção de 0,92× a 1,18× a média) e que os extremos por UF são **ruído de amostra
+# pequena** (SE n=59, AP/RR n≤24) — achado registrado, não veredito, com piso de amostra na rotina
+# trimestral. O `boletim_ocorrencia` é o ponto de maior risco operacional: perdê-lo custa ~9% do
+# valor, mas a política **continua muito acima da regra** — a contingência é "manter o campo como
+# categoria própria + monitorar", não desligar. O `fim_de_semana` segue declarado como atributo
+# morto (18º de 18; 243× menor que a nº 1) e **mantido** por ser derivado da data. As explicações
+# locais do topo da fila são **legíveis** (faixa de valor reclamado, tipo de sinistro, dias de
+# apólice), mas de estabilidade **parcial** — o contrato do app exige **fundo SHAP congelado**.
