@@ -21,6 +21,7 @@ divirja da Fase 4.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -194,9 +195,14 @@ def resultado_economico(
     """Economia e decomposição de custo de uma decisão de perícia.
 
     `economia = 21.700 × TP − 700 × k` é o resultado líquido em relação a **não
-    periciar ninguém**; `custo_total = 21.700 × FN + 700 × FP` é o custo que
-    sobra. As duas contas fecham no mesmo total: `economia = custo_sem_pericia −
-    custo_total`, com `custo_sem_pericia = 21.700 × (nº de fraudes)`.
+    periciar ninguém**: evita-se `21.700 × TP` de fraude paga e gastam-se as `k`
+    perícias, incluindo as que caíram em sinistro legítimo. `custo_sem_pericia =
+    21.700 × (nº de fraudes)` é o custo de não agir.
+
+    `custo_total = 21.700 × FN + 700 × FP` lê a mesma decisão pelo lado do **erro**:
+    o que escapou (fraude não detectada) mais a perícia gasta em sinistro legítimo.
+    É leitura **complementar** à economia, não idêntica: o custo das `TP` perícias
+    bem-sucedidas já está embutido em `−700 × k`.
     """
     y = np.asarray(y_true, dtype=int)
     selecao = np.zeros(len(y), dtype=bool)
@@ -1002,3 +1008,101 @@ def triagem_disparidade(
                 }
             )
     return pd.DataFrame(linhas)
+
+
+# ---------------------------------------------------------------------------
+# Parte 8 — Quadro de Respostas do comitê (consolidação das Perguntas 1 a 5)
+# ---------------------------------------------------------------------------
+# O quadro é a folha de respostas do case: cada linha liga uma pergunta do comitê
+# ao campo que a responde. A ordem e os rótulos vivem **aqui** (fonte única); o
+# notebook só fornece os valores **medidos** — assim o documento, o CSV e o
+# notebook nunca divergem de texto.
+CAMPOS_QUADRO_RESPOSTAS: tuple[tuple[int, str, str], ...] = (
+    (1, "colunas_modelo", "Colunas usadas no modelo final"),
+    (1, "colunas_fora", "Colunas deixadas de fora"),
+    (1, "idade_uf_decisao", "Idade do segurado e UF: usar ou não usar"),
+    (
+        1,
+        "auc_teste_idade_uf",
+        "ROC AUC · PR AUC no teste: com idade e UF · sem idade e UF",
+    ),
+    (2, "taxa_base", "Taxa de fraude da base"),
+    (
+        2,
+        "por_tipo",
+        "Taxa e nº por tipo: Colisão · Vidros · Roubo/Furto · Terceiros · Alagamento · Incêndio",
+    ),
+    (2, "por_canal", "Taxa e nº por canal: App · Corretor · Central 0800"),
+    (2, "por_boletim", "Taxa e nº por boletim: Sim · Não · em branco"),
+    (2, "boletim_branco", "Tratamento dado ao boletim em branco no modelo"),
+    (
+        2,
+        "por_faixa_apolice",
+        "Taxa e nº por tempo de apólice: até 30 · 31 a 90 · 91 a 180 · 181 a 365 · +365",
+    ),
+    (
+        2,
+        "por_faixa_valor",
+        "Taxa e nº por valor reclamado: até 10 · 10–20 · 20–30 · 30–40 · 40–50 · 50–60 · +60 mil",
+    ),
+    (3, "modelos_comparados", "Modelos comparados · modelo recomendado"),
+    (
+        3,
+        "periodos",
+        "Período do treino · período do teste · nº de sinistros no teste",
+    ),
+    (3, "referencia_simples", "ROC AUC · PR AUC da referência simples no teste"),
+    (
+        3,
+        "auc_recomendado",
+        "ROC AUC · PR AUC no treino · no teste (modelo recomendado)",
+    ),
+    (4, "politica_recomendada", "Política recomendada · perícias por mês"),
+    (
+        4,
+        "economia_politica",
+        "Fraudes encontradas · economia no mês: política recomendada",
+    ),
+    (
+        4,
+        "economia_regra",
+        "Fraudes encontradas · economia no mês: regra atual com 900 perícias",
+    ),
+    (4, "ganho_sobre_regra", "Ganho da política sobre a regra atual, por mês"),
+    (4, "acao_regra", "Ação sobre a regra atual"),
+    (5, "acerto_minimo", "Acerto mínimo para uma perícia se pagar"),
+    (
+        5,
+        "k_otimo_equipe",
+        "Perícias por mês de menor custo · ganho mensal além das 900",
+    ),
+    (5, "fraudes_1800", "Fraudes encontradas com 1.800 perícias por mês"),
+    (5, "acao_equipe", "Ação sobre a equipe"),
+)
+
+
+def montar_quadro_respostas(respostas: Mapping[str, str]) -> tuple[pd.DataFrame, str]:
+    """Consolida o Quadro de Respostas do comitê em `DataFrame` **e** em Markdown.
+
+    `respostas` mapeia a chave de cada campo (a segunda coluna de
+    `CAMPOS_QUADRO_RESPOSTAS`) ao valor **medido**. Campo ausente sai como
+    "não informado", para o quadro ficar sempre completo e a lacuna aparecer em vez
+    de sumir. As duas saídas nascem do mesmo laço, então o CSV e o documento não
+    podem divergir.
+    """
+    registros = [
+        {
+            "pergunta": pergunta,
+            "campo": rotulo,
+            "resposta": str(respostas.get(chave, "não informado")),
+        }
+        for pergunta, chave, rotulo in CAMPOS_QUADRO_RESPOSTAS
+    ]
+    quadro = pd.DataFrame(registros, columns=["pergunta", "campo", "resposta"])
+
+    linhas_markdown = ["| Pergunta | Campo | Resposta |", "|---|---|---|"]
+    linhas_markdown.extend(
+        f"| {registro['pergunta']} | {registro['campo']} | {registro['resposta']} |"
+        for registro in registros
+    )
+    return quadro, "\n".join(linhas_markdown)

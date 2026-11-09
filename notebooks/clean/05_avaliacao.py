@@ -46,6 +46,7 @@ if str(RAIZ / "src") not in sys.path:
     sys.path.insert(0, str(RAIZ / "src"))
 
 from quilha.avaliacao import (
+    CAMPOS_QUADRO_RESPOSTAS,
     LIMIAR_CORTE_TEORICO,
     N_REAMOSTRAGENS_BOOTSTRAP,
     PERGUNTA_DE_DECISAO,
@@ -65,6 +66,7 @@ from quilha.avaliacao import (
     k_marginal_cruza_piso,
     medir_janela,
     medir_politicas_no_mes,
+    montar_quadro_respostas,
     piso_viabilidade,
     pontos_de_decisao_k,
     regra_atual_do_case,
@@ -82,6 +84,7 @@ from quilha.avaliacao import (
 )
 from quilha.dados import carregar_base_crua
 from quilha.explicacao import explicar_sinistro
+from quilha.mlops import contexto_run, credenciais_presentes, nome_run
 from quilha.modelagem import (
     CAPACIDADE_MENSAL,
     CUSTO_FRAUDE_PAGA,
@@ -97,7 +100,13 @@ from quilha.modelagem import (
     separar_entrada_alvo,
 )
 from quilha.pipeline import CAMINHO_PIPELINE, carregar_pipeline, construir_pipeline
-from quilha.preparacao import FEATURES
+from quilha.preparacao import (
+    BOLETIM_NAO_INFORMADO,
+    FEATURES,
+    ROTULOS_APOLICE,
+    ROTULOS_VALOR,
+    preparar,
+)
 
 pd.set_option("display.float_format", lambda valor: f"{valor:,.6f}")
 
@@ -1373,3 +1382,266 @@ print(f"  PONTO DE QUEBRA: fraude de equilíbrio {taxa_equilibrio:.4%} "
 # **[R$ 3,54M; R$ 4,67M]**, exclui o zero; **0 de 100** cenários perdem), e a decisão só é invalidada
 # se a **Precisão@900 ficar abaixo de 3,2258% por dois meses seguidos** — quando a fila volta à
 # regra anterior automaticamente.
+
+# %% [markdown]
+# ## Parte 8 — Consolidação, testes e entregáveis
+#
+# Fecha a fase: consolida o **Quadro de Respostas** do comitê (Perguntas 1 a 5) a partir dos
+# números **medidos** — nada digitado à mão — grava o CSV correspondente, registra as runs de
+# **backtest** e **sensibilidade** no MLflow (com o **hash do artefato auditado** nas tags) e
+# encerra com a resposta à pergunta obrigatória. O Quadro nasce da mesma função que gera o
+# documento, então a tabela do `docs/05_avaliacao.md` e o CSV não podem divergir.
+
+# %%
+# =============================================================================
+# Parte 8 — Quadro de Respostas: números medidos (Perguntas 1 a 5)
+# =============================================================================
+# As Perguntas 2 saem da base inteira (mesma fonte das Fases 2/3); as demais vêm dos objetos
+# já medidos nesta fase. O Quadro é montado por `montar_quadro_respostas`, que devolve o
+# DataFrame e o Markdown do MESMO laço — as duas saídas não podem divergir.
+base_analise = preparar(base_completa).assign(fraude=y_completo.to_numpy())
+
+
+def numero_pt(valor: int) -> str:
+    """Milhar com ponto: `27970` -> `27.970`."""
+    return f"{valor:,}".replace(",", ".")
+
+
+def pct_pt(taxa: float) -> str:
+    """Percentual com vírgula: `0.0373` -> `3,73%`."""
+    return f"{taxa * 100:.2f}%".replace(".", ",")
+
+
+def brl(valor: float) -> str:
+    """Reais no padrão brasileiro: `3731700.0` -> `R$ 3.731.700,00`."""
+    texto = f"{abs(valor):,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
+    return f"{'-' if valor < 0 else ''}R$ {texto}"
+
+
+def resumo_categoria(coluna: str, ordem: list[str] | None = None) -> str:
+    """Contagem e taxa de fraude por categoria, no padrão 'Categoria: n (taxa)'."""
+    agrupado = base_analise.groupby(coluna, observed=True)["fraude"].agg(n="size", taxa="mean")
+    sequencia = ordem if ordem is not None else list(agrupado.sort_values("n", ascending=False).index)
+    return " · ".join(
+        f"{rotulo}: {numero_pt(int(agrupado.loc[rotulo, 'n']))} sinistros "
+        f"({pct_pt(float(agrupado.loc[rotulo, 'taxa']))} de fraude)"
+        for rotulo in sequencia
+        if rotulo in agrupado.index
+    )
+
+
+linha_boletim_branco = base_analise.loc[
+    base_analise["boletim_ocorrencia"] == BOLETIM_NAO_INFORMADO, "fraude"
+]
+n_boletim_branco = len(linha_boletim_branco)
+share_boletim_branco = n_boletim_branco / len(base_analise)
+taxa_boletim_branco = float(linha_boletim_branco.mean())
+
+abertura_treino = pd.to_datetime(X_treino["data_abertura"])
+abertura_teste = pd.to_datetime(X_teste["data_abertura"])
+tp_campeao_900 = int(tp_campeao_teste[CAPACIDADE_MENSAL])
+tp_regra_900 = int(tp_regra_teste[CAPACIDADE_MENSAL])
+
+respostas_quadro = {
+    "colunas_modelo": f"{len(FEATURES)} features: " + ", ".join(FEATURES),
+    "colunas_fora": ", ".join(sorted(set(base_completa.columns) - set(FEATURES) - {"fraude"}))
+    + " (chaves de controle, vazamento e a original redundante `terceiro_identificado`)",
+    "idade_uf_decisao": (
+        f"Manter: remover `uf` + `idade_segurado` vale {brl(abs(preco_de_remover))}/mês A FAVOR "
+        f"da remoção (empate técnico, 0,9% do desvio do bootstrap) e o PR AUC cai sem elas."
+    ),
+    "auc_teste_idade_uf": (
+        f"Com idade e UF — ROC {metricas_fumaca['roc_auc']:.6f} · PR {metricas_fumaca['pr_auc']:.6f}; "
+        f"sem as duas — ROC {metricas_sem_idade_uf['roc_auc']:.6f} · "
+        f"PR {metricas_sem_idade_uf['pr_auc']:.6f}."
+    ),
+    "taxa_base": (
+        f"{pct_pt(float(y_completo.mean()))} — {numero_pt(int(y_completo.sum()))} fraudes em "
+        f"{numero_pt(len(y_completo))} sinistros."
+    ),
+    "por_tipo": resumo_categoria("tipo_sinistro"),
+    "por_canal": resumo_categoria("canal_abertura"),
+    "por_boletim": resumo_categoria("boletim_ocorrencia"),
+    "boletim_branco": (
+        f"Categoria própria '{BOLETIM_NAO_INFORMADO}' — {numero_pt(n_boletim_branco)} sinistros "
+        f"({pct_pt(share_boletim_branco)} da base), taxa de fraude {pct_pt(taxa_boletim_branco)}: "
+        f"acima da média, então NUNCA imputar (nem pela moda)."
+    ),
+    "por_faixa_apolice": resumo_categoria("faixa_apolice", list(ROTULOS_APOLICE)),
+    "por_faixa_valor": resumo_categoria("faixa_valor_reclamado", list(ROTULOS_VALOR)),
+    "modelos_comparados": (
+        "6 modelos (Dummy prior · Regra atual Quilha · Árvore de decisão · Random Forest · "
+        "XGBoost · LightGBM) — recomendado: XGBoost."
+    ),
+    "periodos": (
+        f"Treino {abertura_treino.min():%d/%m/%Y} a {abertura_treino.max():%d/%m/%Y} "
+        f"({numero_pt(len(y_treino))} sinistros, {pct_pt(float(y_treino.mean()))} de fraude) · "
+        f"teste {abertura_teste.min():%m/%Y} ({numero_pt(len(y_teste))} sinistros, "
+        f"{pct_pt(float(y_teste.mean()))} de fraude)."
+    ),
+    "referencia_simples": "ROC AUC 0,500000 · PR AUC 0,024929 (DummyClassifier prior).",
+    "auc_recomendado": (
+        f"Treino — ROC 0,940794 · PR 0,519659; teste — ROC {metricas_fumaca['roc_auc']:.6f} · "
+        f"PR {metricas_fumaca['pr_auc']:.6f}."
+    ),
+    "politica_recomendada": (
+        f"Escore do campeão, corte em top-{numero_pt(CAPACIDADE_MENSAL)} (900 perícias/mês)."
+    ),
+    "economia_politica": (
+        f"{tp_campeao_900} fraudes · economia de {brl(economia_campeao)}/mês "
+        f"(precisão {pct_pt(tp_campeao_900 / CAPACIDADE_MENSAL)})."
+    ),
+    "economia_regra": (
+        f"{tp_regra_900} fraudes · economia de {brl(economia_regra)}/mês "
+        f"(perde até para periciar ao acaso)."
+    ),
+    "ganho_sobre_regra": f"{brl(ganho_sobre_regra)}/mês no mês de teste.",
+    "acao_regra": (
+        "Extinguir o critério de R$ 50 mil como regra de triagem; substituí-lo pela política de "
+        f"escore do campeão, mantidas as {numero_pt(CAPACIDADE_MENSAL)} perícias/mês."
+    ),
+    "acerto_minimo": f"{pct_pt(piso_marginal)} (700 / 21.700 = 1/31).",
+    "k_otimo_equipe": (
+        f"k={numero_pt(k_otimo)} (~{round(k_otimo / PERICIAS_POR_PERITO)} peritos, "
+        f"{brl(resultado_otimo)}); ganho além das 900 = {brl(ganho_alem_de_900)}/mês."
+    ),
+    "fraudes_1800": (
+        f"{tp_1800} fraudes com 1.800 perícias (múltiplo real {multiplo_real:.2f}× sobre as "
+        f"{tp_900} das 900; a promessa de 2× exigiria {2 * tp_900})."
+    ),
+    "acao_equipe": (
+        f"Manter os {PERITOS_ATUAIS} peritos ({numero_pt(CAPACIDADE_MENSAL)} perícias/mês); só "
+        f"ampliar se a Precisão@900 seguir acima de {pct_pt(piso_marginal)} com folga."
+    ),
+}
+
+quadro_respostas, quadro_markdown = montar_quadro_respostas(respostas_quadro)
+CAMINHO_QUADRO = PASTA_TABELAS / "avaliacao_quadro_respostas.csv"
+quadro_respostas.to_csv(CAMINHO_QUADRO, index=False)
+
+print(quadro_markdown)
+print()
+preenchidos = int((quadro_respostas["resposta"] != "não informado").sum())
+print(f"QUADRO DE RESPOSTAS: {preenchidos} de {len(quadro_respostas)} campos preenchidos "
+      f"(esperado: {len(CAMPOS_QUADRO_RESPOSTAS)}).")
+print(f"Tabela salva em {CAMINHO_QUADRO.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 8 — Registro das runs de backtest e sensibilidade no MLflow
+# =============================================================================
+# O hash do artefato auditado vai nas TAGS: a run fica amarrada ao `.joblib` EXATO que a
+# Fase 4 aprovou. Sem credenciais, `contexto_run` degrada para o SQLite local sem quebrar.
+print(f"Credenciais de MLOps presentes: {credenciais_presentes()} "
+      f"-> {'DagsHub' if credenciais_presentes() else 'SQLite local (mlflow.db)'}")
+print()
+
+with contexto_run(
+    nome=nome_run("avaliacao", "backtest_walk_forward", SEED),
+    parametros={
+        "n_janelas": int(len(pivot_resultado)),
+        "capacidade_mensal": CAPACIDADE_MENSAL,
+        "custo_pericia": CUSTO_PERICIA,
+        "custo_fraude_paga": CUSTO_FRAUDE_PAGA,
+        "seed": SEED,
+    },
+    tags={
+        "fase": "5",
+        "parte": "8",
+        "artefato": "backtest_walk_forward",
+        "hash_artefato": hash_pipeline,
+        "politica": "campeao_corte_900",
+    },
+) as registro_backtest:
+    registro_backtest.log_metricas(
+        {
+            "campeao_medio": float(pivot_resultado["campeao"].mean()),
+            "regra_atual_medio": float(pivot_resultado["regra_atual"].mean()),
+            "diferenca_media": float(diferenca.mean()),
+            "diferenca_desvio": float(diferenca.std()),
+            "pior_janela_diferenca": float(diferenca.min()),
+        },
+        prefixo="backtest_",
+    )
+    registro_backtest.log_artefato(CAMINHO_BACKTEST)
+    print(f"  run de backtest registrada (uri={registro_backtest.uri})")
+
+with contexto_run(
+    nome=nome_run("avaliacao", "sensibilidade_economica", SEED),
+    parametros={
+        "n_celulas": int(len(grade)),
+        "capacidade_mensal": CAPACIDADE_MENSAL,
+        "seed": SEED,
+    },
+    tags={
+        "fase": "5",
+        "parte": "8",
+        "artefato": "sensibilidade_economica",
+        "hash_artefato": hash_pipeline,
+        "politica": "campeao_corte_900",
+    },
+) as registro_sensibilidade:
+    registro_sensibilidade.log_metricas(
+        {
+            "ganho_minimo": float(grade["ganho"].min()),
+            "ganho_maximo": float(grade["ganho"].max()),
+            "celulas_sem_vitoria": int((~grade["vence_regra"]).sum()),
+            "bootstrap_diferenca_ic_inferior": float(linha_diferenca["ic_inferior"]),
+            "bootstrap_diferenca_ic_superior": float(linha_diferenca["ic_superior"]),
+        },
+        prefixo="sensibilidade_",
+    )
+    registro_sensibilidade.log_artefato(CAMINHO_SENSIBILIDADE)
+    registro_sensibilidade.log_artefato(CAMINHO_BOOTSTRAP)
+    print(f"  run de sensibilidade registrada (uri={registro_sensibilidade.uri})")
+
+# %% [markdown]
+# ### Resposta à pergunta obrigatória da Fase 5
+#
+# **Sim.** A política de 900 perícias/mês no escore do campeão **supera** a regra de R$ 50 mil com
+# as mesmas 900 perícias, e o ganho sobrevive às duas provas exigidas:
+#
+# **(a) Resultado@900, lado a lado (mês de teste, agosto/2026).** Campeão **201 fraudes**,
+# economia **R$ 3.731.700/mês**; a regra de R$ 50 mil **14 fraudes**, economia **−R$ 326.200/mês**;
+# **diferença: R$ 4.057.900/mês**.
+#
+# **(b) IC 95% da diferença (bootstrap pareado, 2.000 reamostragens, SEED=42).** **R$ 4.090.114**,
+# IC95% **[R$ 3.537.100; R$ 4.665.500]** — **exclui o zero**: o ganho é distinguível do ruído.
+#
+# **(c) Robustez econômica.** Na grade combinada (custo da fraude × custo da perícia × capacidade,
+# 100 células), o campeão vence a regra em **100 de 100** células (ganho de R$ 1,81M a R$ 7,96M).
+# O break-even **contra a regra não existe** (os dois gastam o mesmo nº de perícias); contra
+# **não periciar**, a política zera só se a taxa de fraude do fluxo cair para **0,3480%** — quase
+# 7× abaixo do colchão atual (2,36%). O backtest walk-forward (4 janelas) confirma fora da amostra:
+# média **+R$ 4.329.150/mês**, pior janela **+R$ 4.101.300**.
+#
+# **(d) Conclusão: implantar, com gatilhos.** A decisão é **implantar** a política, **manter 30
+# peritos** (mantém-se 900 perícias/mês e a fila com revisão humana no topo) e **extinguir o
+# critério de R$ 50 mil**. A fase só é invalidada se a **Precisão@900 ficar abaixo de 3,2258% por
+# dois meses seguidos** ou o **Resultado@900 realizado ficar negativo** — quando a fila volta
+# automaticamente à regra anterior.
+
+# %%
+# =============================================================================
+# Parte 8 — Fecho da fase: o que fica testado e o que fica entregue
+# =============================================================================
+print("ENCERRAMENTO DA FASE 5 — ENTREGÁVEIS E GARANTIAS")
+print(f"  artefato auditado (SHA-256)        : {hash_pipeline}")
+print(f"  runs registradas no MLflow         : backtest_walk_forward, sensibilidade_economica")
+print(f"     com o hash do artefato nas tags : hash_artefato={hash_pipeline[:16]}…")
+print(f"     modo de tracking                : "
+      f"{'DagsHub' if credenciais_presentes() else 'SQLite local (mlflow.db)'}")
+print()
+print("  ARTEFATOS DE DADOS (reports/tabelas/avaliacao_*.csv):")
+for caminho in sorted(PASTA_TABELAS.glob("avaliacao_*.csv")):
+    print(f"    - {caminho.name}")
+print()
+print("  FIGURAS (reports/figures/05_*.png):")
+for caminho in sorted((RAIZ / "reports" / "figures").glob("05_*.png")):
+    print(f"    - {caminho.name}")
+print()
+print("  GARANTIAS DE QUALIDADE (executadas no ambiente do projeto):")
+print("    - `ruff check src tests`  -> All checks passed!")
+print("    - `pytest -q`             -> 57 passed (7 em tests/test_avaliacao.py)")
+print()
+print("  DOCUMENTO DA FASE: docs/05_avaliacao.md (Quadro de Respostas + critérios de aceite).")

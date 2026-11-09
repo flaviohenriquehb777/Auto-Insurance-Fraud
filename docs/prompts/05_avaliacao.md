@@ -2,7 +2,7 @@
 
 **Projeto:** Detecção de fraude em sinistros de automóvel — Quilha Seguros
 **Fase:** 5 de 6 (CRISP-DM — Avaliação; a "validação" do resultado de negócio)
-**Status:** não iniciada
+**Status:** concluída (Partes 0 a 8)
 **Pré-requisito:** Fase 4 concluída e mergeada na `main` (PR #1, commit de merge `2ecccf4`),
 com evidências em `docs/04_modelagem.md`, campeão em `models/pipeline_fraude.joblib` e a
 curva `Resultado(k)` em `reports/tabelas/parte5_curva_resultado_k.csv`.
@@ -520,15 +520,15 @@ técnica, avisar em duas frases e fazer mesmo assim. Encerrar cada resposta com
 
 | Parte | Descrição | Status |
 |---|---|---|
-| 0 | Reconciliação com o case e travamento do critério | não iniciada |
-| 1 | Auditoria do artefato e das três referências | não iniciada |
-| 2 | Backtest com origem móvel (estimativa fora da amostra) | não iniciada |
-| 3 | Política e economia — Pergunta 4 | não iniciada |
-| 4 | Dimensionamento e valor marginal — Pergunta 5 | não iniciada |
-| 5 | Sensibilidade, break-even e incerteza | não iniciada |
-| 6 | Aceitabilidade, risco e explicabilidade | não iniciada |
-| 7 | Revisão do processo e próximos passos | não iniciada |
-| 8 | Consolidação, testes e entregáveis | não iniciada |
+| 0 | Reconciliação com o case e travamento do critério | concluída |
+| 1 | Auditoria do artefato e das três referências | concluída |
+| 2 | Backtest com origem móvel (estimativa fora da amostra) | concluída |
+| 3 | Política e economia — Pergunta 4 | concluída |
+| 4 | Dimensionamento e valor marginal — Pergunta 5 | concluída |
+| 5 | Sensibilidade, break-even e incerteza | concluída |
+| 6 | Aceitabilidade, risco e explicabilidade | concluída |
+| 7 | Revisão do processo e próximos passos | concluída |
+| 8 | Consolidação, testes e entregáveis | concluída |
 
 ---
 

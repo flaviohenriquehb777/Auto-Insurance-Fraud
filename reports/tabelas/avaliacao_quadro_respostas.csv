@@ -1,0 +1,25 @@
+pergunta,campo,resposta
+1,Colunas usadas no modelo final,"18 features: idade_segurado, dias_de_apolice, sinistros_12m, idade_veiculo, valor_fipe, valor_reclamado, hora, atraso_abertura_dias, razao_reclamado_fipe, tem_terceiro_identificado, canal_abertura, tipo_sinistro, uf, boletim_ocorrencia, periodo_dia, fim_de_semana, faixa_apolice, faixa_valor_reclamado"
+1,Colunas deixadas de fora,"data_abertura, data_ocorrencia, hora_ocorrencia, id_sinistro, terceiro_identificado, valor_indenizado (chaves de controle, vazamento e a original redundante `terceiro_identificado`)"
+1,Idade do segurado e UF: usar ou não usar,"Manter: remover `uf` + `idade_segurado` vale R$ 43.400,00/mês A FAVOR da remoção (empate técnico, 0,9% do desvio do bootstrap) e o PR AUC cai sem elas."
+1,ROC AUC · PR AUC no teste: com idade e UF · sem idade e UF,Com idade e UF — ROC 0.936597 · PR 0.538556; sem as duas — ROC 0.937166 · PR 0.533792.
+2,Taxa de fraude da base,"2,47% — 1.480 fraudes em 60.000 sinistros."
+2,Taxa e nº por tipo: Colisão · Vidros · Roubo/Furto · Terceiros · Alagamento · Incêndio,"Colisão: 31.443 sinistros (4,10% de fraude) · Vidros: 11.970 sinistros (0,01% de fraude) · Roubo/Furto: 5.908 sinistros (0,49% de fraude) · Terceiros: 5.842 sinistros (0,63% de fraude) · Alagamento: 3.002 sinistros (3,13% de fraude) · Incêndio: 1.835 sinistros (1,69% de fraude)"
+2,Taxa e nº por canal: App · Corretor · Central 0800,"App: 26.759 sinistros (2,19% de fraude) · Corretor: 20.899 sinistros (1,56% de fraude) · Central 0800: 12.342 sinistros (4,60% de fraude)"
+2,Taxa e nº por boletim: Sim · Não · em branco,"Sim: 29.131 sinistros (1,17% de fraude) · Não: 27.970 sinistros (3,73% de fraude) · Não informado: 2.899 sinistros (3,24% de fraude)"
+2,Tratamento dado ao boletim em branco no modelo,"Categoria própria 'Não informado' — 2.899 sinistros (4,83% da base), taxa de fraude 3,24%: acima da média, então NUNCA imputar (nem pela moda)."
+2,Taxa e nº por tempo de apólice: até 30 · 31 a 90 · 91 a 180 · 181 a 365 · +365,"até 30: 1.181 sinistros (13,46% de fraude) · 31 a 90: 2.319 sinistros (10,56% de fraude) · 91 a 180: 3.450 sinistros (8,96% de fraude) · 181 a 365: 8.119 sinistros (1,96% de fraude) · mais de 365: 44.931 sinistros (1,35% de fraude)"
+2,Taxa e nº por valor reclamado: até 10 · 10–20 · 20–30 · 30–40 · 40–50 · 50–60 · +60 mil,"até 10 mil: 38.954 sinistros (1,10% de fraude) · 10 a 20: 8.674 sinistros (2,78% de fraude) · 20 a 30: 3.354 sinistros (3,16% de fraude) · 30 a 40: 2.035 sinistros (2,95% de fraude) · 40 a 50: 2.231 sinistros (25,15% de fraude) · 50 a 60: 1.177 sinistros (3,48% de fraude) · acima de 60: 3.575 sinistros (1,17% de fraude)"
+3,Modelos comparados · modelo recomendado,6 modelos (Dummy prior · Regra atual Quilha · Árvore de decisão · Random Forest · XGBoost · LightGBM) — recomendado: XGBoost.
+3,Período do treino · período do teste · nº de sinistros no teste,"Treino 01/04/2026 a 31/07/2026 (48.096 sinistros, 2,49% de fraude) · teste 08/2026 (11.904 sinistros, 2,36% de fraude)."
+3,ROC AUC · PR AUC da referência simples no teste,"ROC AUC 0,500000 · PR AUC 0,024929 (DummyClassifier prior)."
+3,ROC AUC · PR AUC no treino · no teste (modelo recomendado),"Treino — ROC 0,940794 · PR 0,519659; teste — ROC 0.936597 · PR 0.538556."
+4,Política recomendada · perícias por mês,"Escore do campeão, corte em top-900 (900 perícias/mês)."
+4,Fraudes encontradas · economia no mês: política recomendada,"201 fraudes · economia de R$ 3.731.700,00/mês (precisão 22,33%)."
+4,Fraudes encontradas · economia no mês: regra atual com 900 perícias,"14 fraudes · economia de -R$ 326.200,00/mês (perde até para periciar ao acaso)."
+4,"Ganho da política sobre a regra atual, por mês","R$ 4.057.900,00/mês no mês de teste."
+4,Ação sobre a regra atual,"Extinguir o critério de R$ 50 mil como regra de triagem; substituí-lo pela política de escore do campeão, mantidas as 900 perícias/mês."
+5,Acerto mínimo para uma perícia se pagar,"3,23% (700 / 21.700 = 1/31)."
+5,Perícias por mês de menor custo · ganho mensal além das 900,"k=1.430 (~48 peritos, R$ 3.968.300,00); ganho além das 900 = R$ 236.600,00/mês."
+5,Fraudes encontradas com 1.800 perícias por mês,235 fraudes com 1.800 perícias (múltiplo real 1.17× sobre as 201 das 900; a promessa de 2× exigiria 402).
+5,Ação sobre a equipe,"Manter os 30 peritos (900 perícias/mês); só ampliar se a Precisão@900 seguir acima de 3,23% com folga."
