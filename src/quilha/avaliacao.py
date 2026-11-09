@@ -592,3 +592,324 @@ def salvar_ganho_por_perito(
     figura.savefig(caminho, dpi=150)
     plt.close(figura)
     return caminho
+
+
+# ---------------------------------------------------------------------------
+# Sensibilidade, break-even e incerteza (Parte 5)
+# ---------------------------------------------------------------------------
+def tp_acumulado_por_k(y_true, escore) -> np.ndarray:
+    """TP acumulado ao periciar em ordem decrescente de escore, para `k = 0..n`.
+
+    Devolve um vetor de tamanho `n + 1` em que a posição `k` é o número de fraudes
+    capturadas ao cortar a fila em `k`. Como o **ranking** de uma política não
+    depende dos parâmetros econômicos, este vetor permite recomputar `Resultado(k)`
+    sob qualquer custo sem reordenar nada.
+    """
+    y = np.asarray(y_true, dtype=int)
+    ordem = np.argsort(-np.asarray(escore, dtype=float), kind="mergesort")
+    return np.concatenate([[0], np.cumsum(y[ordem])])
+
+
+def resultado_por_k(
+    tp_acumulado: np.ndarray,
+    custo_pericia: float = CUSTO_PERICIA,
+    custo_fraude_paga: float = CUSTO_FRAUDE_PAGA,
+) -> np.ndarray:
+    """Vetor `Resultado(k) = custo_fraude × TP(k) − custo_pericia × k`, para `k = 0..n`."""
+    k = np.arange(len(tp_acumulado))
+    return custo_fraude_paga * tp_acumulado - custo_pericia * k
+
+
+def _resumo_amostra(amostra: np.ndarray) -> dict[str, float]:
+    """Média, desvio e IC 95% (percentis 2,5 e 97,5) de uma amostra bootstrap."""
+    return {
+        "media": float(np.mean(amostra)),
+        "desvio": float(np.std(amostra, ddof=1)),
+        "ic_inferior": float(np.percentile(amostra, 2.5)),
+        "ic_superior": float(np.percentile(amostra, 97.5)),
+    }
+
+
+def bootstrap_resultado(
+    y_true,
+    escores: dict[str, np.ndarray],
+    k: int = CAPACIDADE_MENSAL,
+    n_reamostragens: int = N_REAMOSTRAGENS_BOOTSTRAP,
+    seed: int = SEED,
+    custo_pericia: float = CUSTO_PERICIA,
+    custo_fraude_paga: float = CUSTO_FRAUDE_PAGA,
+) -> tuple[pd.DataFrame, dict[str, float | bool]]:
+    """IC 95% do `Resultado@k` por bootstrap no mês de teste (reamostragem pareada).
+
+    Cada reamostragem sorteia `n` linhas **com reposição** e **repete a decisão**
+    inteira: reordena pelo escore e corta em `k`. Assim o intervalo captura tanto a
+    variabilidade das fraudes quanto a da própria fila, não só a contagem de TP.
+    A mesma reamostragem alimenta todas as políticas de `escores` (comparação
+    **pareada**); a linha `diferenca` é a primeira política menos a segunda.
+    """
+    y = np.asarray(y_true, dtype=int)
+    n = len(y)
+    chaves = list(escores)
+    matrizes = {chave: np.asarray(escores[chave], dtype=float) for chave in chaves}
+    corte = min(k, n)
+    gerador = np.random.default_rng(seed)
+
+    amostras = {chave: np.empty(n_reamostragens, dtype=float) for chave in chaves}
+    for posicao in range(n_reamostragens):
+        idx = gerador.integers(0, n, size=n)
+        y_amostra = y[idx]
+        for chave in chaves:
+            escore_amostra = matrizes[chave][idx]
+            selecao = np.argsort(-escore_amostra, kind="mergesort")[:corte]
+            tp = int(y_amostra[selecao].sum())
+            amostras[chave][posicao] = custo_fraude_paga * tp - custo_pericia * corte
+
+    chave_a, chave_b = chaves[0], chaves[1]
+    diferenca = amostras[chave_a] - amostras[chave_b]
+
+    linhas = [{"metrica": chave, **_resumo_amostra(amostras[chave])} for chave in chaves]
+    linhas.append({"metrica": "diferenca", **_resumo_amostra(diferenca)})
+    tabela = pd.DataFrame(linhas)[["metrica", "media", "desvio", "ic_inferior", "ic_superior"]]
+
+    inferior = float(np.percentile(diferenca, 2.5))
+    superior = float(np.percentile(diferenca, 97.5))
+    resumo: dict[str, float | bool] = {
+        "comparacao": f"{chave_a} - {chave_b}",
+        "diferenca_media": float(np.mean(diferenca)),
+        "diferenca_ic_inferior": inferior,
+        "diferenca_ic_superior": superior,
+        "exclui_zero": bool(inferior > 0.0 or superior < 0.0),
+        "n_reamostragens": n_reamostragens,
+        "seed": seed,
+    }
+    return tabela, resumo
+
+
+def salvar_bootstrap(tabela: pd.DataFrame, caminho: Path | str | None = None) -> Path:
+    """IC 95% por bootstrap: barras de erro do campeão, da regra atual e da diferença."""
+    if caminho is None:
+        caminho = PASTA_FIGURAS / "05_04_bootstrap.png"
+    caminho = Path(caminho)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+
+    rotulos = list(tabela["metrica"])
+    medias = tabela["media"].to_numpy() / 1000.0
+    erros = np.vstack(
+        [
+            (tabela["media"] - tabela["ic_inferior"]).to_numpy() / 1000.0,
+            (tabela["ic_superior"] - tabela["media"]).to_numpy() / 1000.0,
+        ]
+    )
+
+    figura, eixo = plt.subplots(figsize=(10, 6))
+    cores = ["#1f4e79", "#c62828", "#2e7d32"]
+    eixo.errorbar(
+        medias,
+        rotulos,
+        xerr=erros,
+        fmt="o",
+        capsize=6,
+        lw=2,
+        ms=8,
+        ecolor="0.3",
+    )
+    for posicao, cor in enumerate(cores[: len(rotulos)]):
+        eixo.plot(medias[posicao], posicao, marker="o", ms=9, color=cor)
+    eixo.axvline(0.0, color="0.4", lw=1, ls="--")
+    eixo.set_xlabel("Resultado líquido no mês (R$ mil)")
+    eixo.set_title(
+        "Fase 5 — intervalo de confiança de 95% (2.000 reamostragens, SEED=42)"
+    )
+    eixo.grid(alpha=0.3, axis="x")
+    figura.tight_layout()
+    figura.savefig(caminho, dpi=150)
+    plt.close(figura)
+    return caminho
+
+
+def grade_sensibilidade(
+    tp_acumulado_campeao: np.ndarray,
+    tp_acumulado_regra: np.ndarray,
+    grade_custo_fraude_paga: tuple[float, ...] = GRADE_CUSTO_FRAUDE_PAGA,
+    grade_custo_pericia: tuple[float, ...] = GRADE_CUSTO_PERICIA,
+    grade_capacidade: tuple[int, ...] = GRADE_CAPACIDADE,
+) -> pd.DataFrame:
+    """Grade combinada de sensibilidade econômica (custo da fraude × perícia × capacidade).
+
+    Em cada célula, `k` é a capacidade do cenário. Como o ranking do campeão e o da
+    regra **não dependem dos custos**, o `TP(k)` de cada política é o mesmo em toda a
+    grade — o que muda é a valoração. Cada linha traz o resultado das duas políticas
+    na capacidade do cenário, o ganho (campeão − regra), o `k` ótimo sob aquele par
+    de custos e o resultado nele.
+    """
+    linhas: list[dict[str, float | int | bool]] = []
+    for custo_fraude in grade_custo_fraude_paga:
+        for custo_pericia in grade_custo_pericia:
+            resultado_campeao = resultado_por_k(tp_acumulado_campeao, custo_pericia, custo_fraude)
+            resultado_regra = resultado_por_k(tp_acumulado_regra, custo_pericia, custo_fraude)
+            posicao_otima = int(np.argmax(resultado_campeao))
+            for capacidade in grade_capacidade:
+                k = min(int(capacidade), len(tp_acumulado_campeao) - 1)
+                linhas.append(
+                    {
+                        "custo_fraude_paga": float(custo_fraude),
+                        "custo_pericia": float(custo_pericia),
+                        "capacidade": int(capacidade),
+                        "k": k,
+                        "tp_campeao": int(tp_acumulado_campeao[k]),
+                        "tp_regra": int(tp_acumulado_regra[k]),
+                        "resultado_campeao": float(resultado_campeao[k]),
+                        "resultado_regra": float(resultado_regra[k]),
+                        "ganho": float(resultado_campeao[k] - resultado_regra[k]),
+                        "k_otimo": posicao_otima,
+                        "resultado_no_otimo": float(resultado_campeao[posicao_otima]),
+                    }
+                )
+    tabela = pd.DataFrame(linhas)
+    tabela["vence_regra"] = tabela["ganho"] > 0.0
+    return tabela
+
+
+def salvar_sensibilidade(grade: pd.DataFrame, caminho: Path | str | None = None) -> Path:
+    """Heatmap do ganho sobre a regra atual: custo da fraude (linhas) × capacidade (colunas)."""
+    if caminho is None:
+        caminho = PASTA_FIGURAS / "05_02_sensibilidade.png"
+    caminho = Path(caminho)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+
+    recorte = grade[grade["custo_pericia"] == CUSTO_PERICIA]
+    matriz = (
+        recorte.pivot(index="custo_fraude_paga", columns="capacidade", values="ganho") / 1000.0
+    )
+
+    figura, eixo = plt.subplots(figsize=(10, 6))
+    limite = float(np.max(np.abs(matriz.to_numpy())))
+    imagem = eixo.imshow(
+        matriz.to_numpy(),
+        cmap="RdYlGn",
+        aspect="auto",
+        origin="lower",
+        vmin=-limite,
+        vmax=limite,
+    )
+    eixo.set_xticks(range(len(matriz.columns)), [str(coluna) for coluna in matriz.columns])
+    eixo.set_yticks(range(len(matriz.index)), [f"{valor:,.0f}" for valor in matriz.index])
+    eixo.set_xlabel("capacidade (perícias/mês)")
+    eixo.set_ylabel("custo da fraude paga (R$)")
+    for linha in range(matriz.shape[0]):
+        for coluna in range(matriz.shape[1]):
+            eixo.text(
+                coluna, linha, f"{matriz.to_numpy()[linha, coluna]:,.0f}",
+                ha="center", va="center", fontsize=9,
+            )
+    eixo.set_title(
+        "Fase 5 — ganho do campeão sobre a regra atual (R$ mil)\n"
+        f"custo da perícia fixo em R$ {CUSTO_PERICIA:,.0f}"
+    )
+    figura.colorbar(imagem, ax=eixo, label="ganho (R$ mil)")
+    figura.tight_layout()
+    figura.savefig(caminho, dpi=150)
+    plt.close(figura)
+    return caminho
+
+
+def break_even(
+    tp_campeao: int,
+    tp_regra: int,
+    k: int = CAPACIDADE_MENSAL,
+    custo_pericia: float = CUSTO_PERICIA,
+) -> dict[str, float | bool]:
+    """Valores críticos em que a política — ou a vantagem sobre a regra — se anula.
+
+    Com a **mesma capacidade** `k`, o ganho sobre a regra vale
+    `custo_fraude × (tp_campeao − tp_regra)`: não depende do custo da perícia e só
+    zera se o custo da fraude for zero. Já a **própria política** deixa de se pagar
+    abaixo de `custo_pericia × k / tp_campeao` por fraude paga (razão
+    `custo_fraude / custo_pericia = k / tp_campeao`). A regra atual exige muito mais.
+    """
+    custo_critico_politica = custo_pericia * k / tp_campeao if tp_campeao else float("inf")
+    custo_critico_regra = custo_pericia * k / tp_regra if tp_regra else float("inf")
+    return {
+        "custo_fraude_critico_politica": float(custo_critico_politica),
+        "razao_critica_politica": float(k / tp_campeao) if tp_campeao else float("inf"),
+        "custo_fraude_critico_regra": float(custo_critico_regra),
+        "razao_critica_regra": float(k / tp_regra) if tp_regra else float("inf"),
+        "vantagem_sobre_regra_sempre_positiva": bool(tp_campeao > tp_regra),
+    }
+
+
+def sensibilidade_taxa_fraude(
+    y_true,
+    escore,
+    k: int = CAPACIDADE_MENSAL,
+    taxas_alvo: tuple[float, ...] = (0.002, 0.0035, 0.005, 0.0075, 0.010, 0.015, 0.020, 0.0247),
+    n_repeticoes: int = 200,
+    seed: int = SEED,
+    custo_pericia: float = CUSTO_PERICIA,
+    custo_fraude_paga: float = CUSTO_FRAUDE_PAGA,
+) -> pd.DataFrame:
+    """Resultado@k sob prevalência de fraude simulada (drift) na janela de avaliação.
+
+    O escore e a ordem da fila ficam **congelados**: muda apenas quantas fraudes
+    existem no mês. Para cada taxa-alvo, sorteia `n_alvo` fraudes entre as observadas
+    sem reposição (e com reposição quando o alvo excede o observado) e reavalia o
+    `Resultado@k` no mesmo topo de fila, repetindo `n_repeticoes` vezes com `SEED`.
+    """
+    y = np.asarray(y_true, dtype=int)
+    n = len(y)
+    n_fraudes = int(y.sum())
+    n_negativos = n - n_fraudes
+    escore = np.asarray(escore, dtype=float)
+    corte = min(k, n)
+    selecao = np.argsort(-escore, kind="mergesort")[:corte]
+    mascara_topo = np.zeros(n, dtype=bool)
+    mascara_topo[selecao] = True
+    fraude_no_topo = mascara_topo[np.nonzero(y == 1)[0]]
+
+    gerador = np.random.default_rng(seed)
+    linhas: list[dict[str, float | int | bool]] = []
+    for taxa in taxas_alvo:
+        n_alvo = int(round(taxa * n_negativos / (1.0 - taxa)))
+        n_alvo = min(max(n_alvo, 0), n_fraudes)
+        resultados = np.empty(n_repeticoes, dtype=float)
+        for repeticao in range(n_repeticoes):
+            sorteio = gerador.choice(n_fraudes, size=n_alvo, replace=False)
+            no_topo = int(fraude_no_topo[sorteio].sum())
+            resultados[repeticao] = custo_fraude_paga * no_topo - custo_pericia * corte
+        linhas.append(
+            {
+                "taxa_alvo": float(taxa),
+                "n_fraudes_alvo": int(n_alvo),
+                "resultado_medio": float(resultados.mean()),
+                "resultado_desvio": float(resultados.std(ddof=1)),
+                "paga": bool(resultados.mean() > 0.0),
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
+def taxa_fraude_de_break_even(
+    y_true,
+    escore,
+    k: int = CAPACIDADE_MENSAL,
+    custo_pericia: float = CUSTO_PERICIA,
+    custo_fraude_paga: float = CUSTO_FRAUDE_PAGA,
+) -> float:
+    """Taxa de fraude mínima do fluxo para a política se pagar com o `k` de hoje.
+
+    Com a fila congelada, o topo de `k` captura uma **cobertura** fixa das fraudes.
+    Zerando `custo_fraude × n_alvo × cobertura − custo_pericia × k`, obtém-se o
+    número mínimo de fraudes do mês e, daí, a taxa de fraude de equilíbrio.
+    """
+    y = np.asarray(y_true, dtype=int)
+    n = len(y)
+    n_fraudes = int(y.sum())
+    n_negativos = n - n_fraudes
+    corte = min(k, n)
+    selecao = np.argsort(-np.asarray(escore, dtype=float), kind="mergesort")[:corte]
+    tp_no_k = int(y[selecao].sum())
+    cobertura = tp_no_k / n_fraudes if n_fraudes else 0.0
+    if cobertura <= 0.0:
+        return float("inf")
+    n_alvo = custo_pericia * corte / (custo_fraude_paga * cobertura)
+    return float(n_alvo / (n_negativos + n_alvo))

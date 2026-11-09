@@ -50,12 +50,15 @@ from quilha.avaliacao import (
     PERICIAS_POR_PERITO,
     PERITOS_ATUAIS,
     aplicar_politica,
+    bootstrap_resultado,
+    break_even,
     construir_politica_campeao,
     construir_referencias,
     curva_ganho_por_perito,
     custo_sem_pericia,
     escore_positivo,
     executar_backtest,
+    grade_sensibilidade,
     janelas_walk_forward,
     k_marginal_cruza_piso,
     medir_janela,
@@ -66,8 +69,13 @@ from quilha.avaliacao import (
     resultado_economico,
     resultado_liquido,
     resumo_parametros_decisao,
+    salvar_bootstrap,
     salvar_curva_decisao,
     salvar_ganho_por_perito,
+    salvar_sensibilidade,
+    sensibilidade_taxa_fraude,
+    taxa_fraude_de_break_even,
+    tp_acumulado_por_k,
 )
 from quilha.dados import carregar_base_crua
 from quilha.modelagem import (
@@ -76,6 +84,7 @@ from quilha.modelagem import (
     CUSTO_PERICIA,
     LIMIAR_REGRA_ATUAL,
     PASTA_TABELAS,
+    SINISTROS_POR_MES,
     calcular_k_proporcional,
     calcular_metricas_holdout,
     carregar_treino_teste,
@@ -726,3 +735,203 @@ print(
 #
 # A tese do Otávio cai por aritmética: dobrar as perícias **não** dobra as fraudes — a precisão
 # marginal decresce porque o topo da fila já concentra as fraudes mais óbvias.
+
+# %% [markdown]
+# ## Parte 5 — Sensibilidade, break-even e incerteza
+#
+# Uma medição só vira **estratégia robusta** quando sobrevive à incerteza. Aqui o mês de teste é
+# submetido a três estresses: o **bootstrap** (erro de amostragem do próprio mês), a **variação
+# dos parâmetros econômicos** do Anexo 1 (custo da fraude, custo da perícia, capacidade) e o
+# **drift de prevalência** (a taxa de fraude do fluxo mudando). O critério de decisão é explícito:
+# a recomendação só é afirmada se o IC 95% da diferença **excluir o zero**.
+
+# %%
+# =============================================================================
+# Parte 5 — Bootstrap do mês de teste (IC 95% do resultado e da diferença)
+# =============================================================================
+escore_campeao_teste = escore_positivo(pipeline, X_teste)
+escore_regra_teste = escore_positivo(referencias["regra_atual"].estimador, X_teste)
+
+tabela_bootstrap, resumo_bootstrap = bootstrap_resultado(
+    y_teste,
+    {"campeao": escore_campeao_teste, "regra_atual": escore_regra_teste},
+    k=CAPACIDADE_MENSAL,
+)
+
+print(f"BOOTSTRAP DO MÊS DE TESTE — {resumo_bootstrap['n_reamostragens']:,} reamostragens, "
+      f"SEED={resumo_bootstrap['seed']}")
+print(
+    f"{'métrica':<12}{'média':>16}{'desvio':>16}{'IC 95% inferior':>20}{'IC 95% superior':>20}"
+)
+for _, linha in tabela_bootstrap.iterrows():
+    print(
+        f"{linha['metrica']:<12}"
+        f"R$ {linha['media']:>12,.0f}"
+        f"R$ {linha['desvio']:>12,.0f}"
+        f"R$ {linha['ic_inferior']:>16,.0f}"
+        f"R$ {linha['ic_superior']:>16,.0f}"
+    )
+print()
+print(
+    f"  diferença pareada ({resumo_bootstrap['comparacao']}): "
+    f"R$ {resumo_bootstrap['diferenca_media']:,.2f} "
+    f"[R$ {resumo_bootstrap['diferenca_ic_inferior']:,.2f}; "
+    f"R$ {resumo_bootstrap['diferenca_ic_superior']:,.2f}]"
+)
+if resumo_bootstrap["exclui_zero"]:
+    print("  VEREDITO: o IC 95% da diferença EXCLUI o zero -> o ganho é distinguível do ruído.")
+else:
+    print("  VEREDITO: o IC 95% da diferença CONTÉM o zero -> indistinguível do ruído.")
+
+CAMINHO_BOOTSTRAP = PASTA_TABELAS / "avaliacao_bootstrap.csv"
+tabela_bootstrap.to_csv(CAMINHO_BOOTSTRAP, index=False)
+caminho_fig_bootstrap = salvar_bootstrap(tabela_bootstrap)
+print()
+print(f"Tabela salva em {CAMINHO_BOOTSTRAP.relative_to(RAIZ)}")
+print(f"Figura salva em {caminho_fig_bootstrap.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 5 — Grade de sensibilidade econômica (um fator por vez e combinada)
+# =============================================================================
+tp_campeao_teste = tp_acumulado_por_k(y_teste, escore_campeao_teste)
+tp_regra_teste = tp_acumulado_por_k(y_teste, escore_regra_teste)
+grade = grade_sensibilidade(tp_campeao_teste, tp_regra_teste)
+
+visao_fraude = grade[
+    (grade["custo_pericia"] == CUSTO_PERICIA) & (grade["capacidade"] == CAPACIDADE_MENSAL)
+]
+visao_pericia = grade[
+    (grade["custo_fraude_paga"] == CUSTO_FRAUDE_PAGA) & (grade["capacidade"] == CAPACIDADE_MENSAL)
+]
+visao_capacidade = grade[
+    (grade["custo_fraude_paga"] == CUSTO_FRAUDE_PAGA) & (grade["custo_pericia"] == CUSTO_PERICIA)
+]
+
+print("UM FATOR POR VEZ — custo da fraude (perícia R$ 700, capacidade 900)")
+print(
+    visao_fraude[
+        ["custo_fraude_paga", "k_otimo", "resultado_campeao", "resultado_regra", "ganho", "vence_regra"]
+    ].to_string(index=False)
+)
+print()
+print("UM FATOR POR VEZ — custo da perícia (fraude R$ 21.700, capacidade 900)")
+print(
+    visao_pericia[
+        ["custo_pericia", "k_otimo", "resultado_campeao", "resultado_regra", "ganho", "vence_regra"]
+    ].to_string(index=False)
+)
+print()
+print("UM FATOR POR VEZ — capacidade (fraude R$ 21.700, perícia R$ 700)")
+print(
+    visao_capacidade[
+        ["capacidade", "k", "tp_campeao", "resultado_campeao", "ganho", "k_otimo"]
+    ].to_string(index=False)
+)
+print()
+print(f"GRADE COMBINADA ({len(grade)} células):")
+print(f"  ganho mínimo sobre a regra : R$ {grade['ganho'].min():,.2f}")
+print(f"  ganho máximo sobre a regra : R$ {grade['ganho'].max():,.2f}")
+print(f"  células em que NÃO vence a regra: {int((~grade['vence_regra']).sum())} de {len(grade)}")
+
+CAMINHO_SENSIBILIDADE = PASTA_TABELAS / "avaliacao_sensibilidade.csv"
+grade.to_csv(CAMINHO_SENSIBILIDADE, index=False)
+caminho_fig_sensibilidade = salvar_sensibilidade(grade)
+print()
+print(f"Tabela salva em {CAMINHO_SENSIBILIDADE.relative_to(RAIZ)}")
+print(f"Figura salva em {caminho_fig_sensibilidade.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 5 — Break-even: a que custo a política (ou a vantagem) desaparece
+# =============================================================================
+be = break_even(
+    tp_campeao=int(tp_campeao_teste[CAPACIDADE_MENSAL]),
+    tp_regra=int(tp_regra_teste[CAPACIDADE_MENSAL]),
+    k=CAPACIDADE_MENSAL,
+)
+
+print("BREAK-EVEN ECONÔMICO (capacidade de 900, custo da perícia R$ 700)")
+print(f"  TP do campeão @900: {int(tp_campeao_teste[CAPACIDADE_MENSAL])} | "
+      f"TP da regra @900: {int(tp_regra_teste[CAPACIDADE_MENSAL])}")
+print()
+print("  (A) A PRÓPRIA POLÍTICA deixa de se pagar se a fraude média custar menos de...")
+print(f"      custo_fraude crítico = R$ {be['custo_fraude_critico_politica']:,.2f} por fraude")
+print(f"      razão custo_fraude / custo_pericia crítica = {be['razao_critica_politica']:.3f} : 1")
+print("  (B) A REGRA ATUAL, com a mesma conta, exigiria...")
+print(f"      custo_fraude crítico = R$ {be['custo_fraude_critico_regra']:,.2f} por fraude")
+print(f"      razão custo_fraude / custo_pericia crítica = {be['razao_critica_regra']:.3f} : 1")
+print()
+if be["vantagem_sobre_regra_sempre_positiva"]:
+    print("  (C) VANTAGEM SOBRE A REGRA: com o MESMO k, o ganho vale")
+    print("      custo_fraude × (TP_campeão − TP_regra) — não existe custo de fraude que")
+    print("      zere a vantagem, porque o campeão acha mais fraudes com o mesmo nº de perícias.")
+    print("      O break-even do projeto é, portanto, contra 'não periciar' (item A), não contra a regra.")
+
+# %%
+# =============================================================================
+# Parte 5 — Sensibilidade à taxa de fraude (drift) e o piso por concentração
+# =============================================================================
+tabela_drift = sensibilidade_taxa_fraude(y_teste, escore_campeao_teste, k=CAPACIDADE_MENSAL)
+taxa_base = float(y_teste.mean())
+taxa_be = taxa_fraude_de_break_even(y_teste, escore_campeao_teste, k=CAPACIDADE_MENSAL)
+precisao_900 = float(tp_campeao_teste[CAPACIDADE_MENSAL] / CAPACIDADE_MENSAL)
+lift_900 = precisao_900 / taxa_base
+
+print("SENSIBILIDADE À TAXA DE FRAUDE (drift) — fila congelada, muda só a prevalência")
+print(
+    tabela_drift[["taxa_alvo", "n_fraudes_alvo", "resultado_medio", "resultado_desvio", "paga"]]
+    .to_string(index=False)
+)
+print()
+print("PISO POR CONCENTRAÇÃO")
+print(f"  taxa de fraude do fluxo (agosto)          : {taxa_base * 100:.4f}%")
+print(f"  piso de viabilidade p* = 700/21.700        : {piso_viabilidade() * 100:.4f}%")
+print(f"  precisão@900 do campeão                    : {precisao_900 * 100:.4f}%  "
+      f"(lift {lift_900:.2f}× a taxa base)")
+print(f"  -> periciar ao acaso perderia (taxa base < piso); a política só vence por concentração.")
+print(f"  taxa de fraude de equilíbrio (drift)       : {taxa_be * 100:.4f}%")
+print(f"  abaixo dessa taxa a política deixa de se pagar — e ela é ~{piso_viabilidade() / taxa_be:.1f}× "
+      f"menor que o piso, graças ao lift do topo da fila.")
+
+CAMINHO_DRIFT = PASTA_TABELAS / "avaliacao_taxa_fraude.csv"
+tabela_drift.to_csv(CAMINHO_DRIFT, index=False)
+print()
+print(f"Tabela salva em {CAMINHO_DRIFT.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 5 — Ponto de quebra operacional: a escala do k com o volume
+# =============================================================================
+volumes = (9_000, 12_024, 15_000, 18_000, 24_000)
+tabela_volume = pd.DataFrame({"volume_mes": list(volumes)})
+tabela_volume["fator_volume"] = tabela_volume["volume_mes"] / SINISTROS_POR_MES
+tabela_volume["k"] = [calcular_k_proporcional(int(v)) for v in tabela_volume["volume_mes"]]
+
+resultado_900 = float(
+    tabela_curva.loc[tabela_curva["k"] == CAPACIDADE_MENSAL, "resultado_liquido"].iloc[0]
+)
+tabela_volume["resultado_proporcional"] = tabela_volume["fator_volume"] * resultado_900
+
+print("PONTO DE QUEBRA OPERACIONAL — regra de escala do k (k = 900 × n_mês / 12.024)")
+print(tabela_volume.to_string(index=False))
+print()
+print(f"  Com a taxa de fraude constante, o resultado escala junto com o volume "
+      f"(R$ {resultado_900:,.2f} × fator): a economia por sinistro fica estável.")
+print("  GATILHO que exige reavaliação:")
+print(f"    - taxa de fraude do mês abaixo de {taxa_be * 100:.2f}% (drift além do break-even);")
+print(f"    - precisão@900 abaixo do piso de {piso_viabilidade() * 100:.2f}% por dois meses seguidos;")
+print("    - volume fora da faixa de 9.000 a 18.000 sinistros/mês (pico de alagamento).")
+
+# %% [markdown]
+# **Leitura da Parte 5.** O bootstrap responde à pergunta que o comitê tem de fazer antes de assinar:
+# o ganho de ~R$ 4 milhões/mês sobre a regra é **estatisticamente distinguível de zero** — o IC 95%
+# da diferença pareada não toca o zero. A grade de sensibilidade mostra que a vitória **não depende**
+# de nenhum parâmetro isolado: variando o custo da fraude de R$ 10 mil a R$ 40 mil, o custo da perícia
+# de R$ 500 a R$ 1.500 e a capacidade de 600 a 2.400, o campeão segue à frente da regra em toda célula,
+# e o break-even contra a regra **não existe** justamente porque os dois gastam o mesmo nº de perícias.
+#
+# O ponto frágil é outro — e é honesto nomeá-lo: a política perde valor se a **prevalência** cair.
+# Como a taxa base (2,47%) já está abaixo do piso (3,2258%), quem sustenta a política é o *lift* de
+# ~9× no topo da fila; o resultado zera só se a taxa de fraude cair para perto de **0,36%** — quase
+# 7× o colchão atual. É esse o número que vira gatilho de monitoramento na Fase 6.
