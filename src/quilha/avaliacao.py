@@ -447,7 +447,7 @@ def salvar_curva_decisao(
 ) -> Path:
     """Curva `Resultado(k)` do campeão no mês de teste, com os pontos de decisão anotados."""
     if caminho is None:
-        caminho = PASTA_FIGURAS / "05_curva_decisao.png"
+        caminho = PASTA_FIGURAS / "05_01_curva_resultado_k.png"
     caminho = Path(caminho)
     caminho.parent.mkdir(parents=True, exist_ok=True)
 
@@ -480,6 +480,114 @@ def salvar_curva_decisao(
     eixo.set_title("Fase 5 — curva Resultado(k) do campeão no mês de teste e os pontos de decisão")
     eixo.grid(alpha=0.3)
     eixo.legend(loc="lower left")
+    figura.tight_layout()
+    figura.savefig(caminho, dpi=150)
+    plt.close(figura)
+    return caminho
+
+
+# ---------------------------------------------------------------------------
+# Dimensionamento da equipe e valor marginal (Parte 4)
+# ---------------------------------------------------------------------------
+# O case define a capacidade como 30 peritos × 30 perícias/mês. A contratação é
+# discreta: cada perito a mais vale 30 perícias a mais na curva Resultado(k).
+PERICIAS_POR_PERITO = 30
+PERITOS_ATUAIS = CAPACIDADE_MENSAL // PERICIAS_POR_PERITO
+
+
+def k_marginal_cruza_piso(
+    tabela_curva: pd.DataFrame,
+    piso: float | None = None,
+) -> int:
+    """Primeiro `k` em que a probabilidade do k-ésimo sinistro cai abaixo do piso.
+
+    É o ponto em que a **perícia marginal** deixa de ter valor esperado positivo —
+    o `limiar_corte_teorico` da Fase 4 visto pela curva. Contado à parte, serve de
+    contraprova do `k_corte_teorico` que vem no resumo da curva.
+    """
+    if piso is None:
+        piso = piso_viabilidade()
+    probabilidade = tabela_curva["probabilidade_do_k_esimo"].to_numpy()
+    abaixo = np.nonzero(probabilidade[1:] < piso)[0]
+    return int(abaixo[0] + 1) if abaixo.size else len(tabela_curva) - 1
+
+
+def curva_ganho_por_perito(
+    tabela_curva: pd.DataFrame,
+    peritos_max: int,
+    pericas_por_perito: int = PERICIAS_POR_PERITO,
+    peritos_base: int = PERITOS_ATUAIS,
+) -> pd.DataFrame:
+    """Resultado e ganho marginal por número de peritos (contratação discreta).
+
+    A capacidade é `k = peritos × pericas_por_perito`, e o resultado sai da curva
+    `Resultado(k)`. `ganho_marginal_perito` é o acréscimo de resultado trazido pelo
+    perito adicional e `ganho_sobre_base`, o acumulado em relação à equipe de
+    `peritos_base` (hoje, 30 peritos = 900 perícias).
+    """
+    maximo_k = len(tabela_curva) - 1
+    linhas = [
+        {
+            "peritos": peritos,
+            "k": min(peritos * pericas_por_perito, maximo_k),
+        }
+        for peritos in range(1, peritos_max + 1)
+    ]
+    quadro = pd.DataFrame(linhas)
+    quadro["resultado_liquido"] = [
+        float(tabela_curva.loc[tabela_curva["k"] == k, "resultado_liquido"].iloc[0])
+        for k in quadro["k"]
+    ]
+    resultado_base = float(
+        quadro.loc[quadro["peritos"] == peritos_base, "resultado_liquido"].iloc[0]
+    )
+    quadro["ganho_marginal_perito"] = quadro["resultado_liquido"].diff()
+    quadro["ganho_sobre_base"] = quadro["resultado_liquido"] - resultado_base
+    return quadro
+
+
+def salvar_ganho_por_perito(
+    quadro: pd.DataFrame,
+    marcos: dict[str, int],
+    caminho: Path | str | None = None,
+) -> Path:
+    """Figura do ganho por perito: resultado acumulado e ganho marginal do perito adicional."""
+    if caminho is None:
+        caminho = PASTA_FIGURAS / "05_03_ganho_por_perito.png"
+    caminho = Path(caminho)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+
+    figura, eixo = plt.subplots(figsize=(11, 6))
+    eixo.plot(
+        quadro["peritos"],
+        quadro["resultado_liquido"] / 1000.0,
+        color="#1f4e79",
+        lw=2,
+        label="Resultado líquido (R$ mil)",
+    )
+    eixo.set_xlabel("peritos na equipe")
+    eixo.set_ylabel("Resultado líquido (R$ mil)", color="#1f4e79")
+    eixo.grid(alpha=0.3)
+
+    eixo_marg = eixo.twinx()
+    eixo_marg.bar(
+        quadro["peritos"],
+        quadro["ganho_marginal_perito"] / 1000.0,
+        color="#c62828",
+        alpha=0.30,
+        label="ganho marginal do perito (R$ mil)",
+    )
+    eixo_marg.axhline(0.0, color="0.4", lw=1)
+    eixo_marg.set_ylabel("Ganho marginal do perito (R$ mil)", color="#c62828")
+
+    cores = ["#2e7d32", "#f9a825", "#6a1b9a"]
+    for (rotulo, peritos), cor in zip(marcos.items(), cores, strict=True):
+        eixo.axvline(peritos, color=cor, ls="--", lw=1.4, label=f"{rotulo} = {peritos}")
+
+    eixo.set_title("Fase 5 — ganho por perito na curva Resultado(k) do campeão")
+    linhas, rotulos_eixo = eixo.get_legend_handles_labels()
+    linhas_marg, rotulos_marg = eixo_marg.get_legend_handles_labels()
+    eixo.legend(linhas + linhas_marg, rotulos_eixo + rotulos_marg, loc="upper left", fontsize=9)
     figura.tight_layout()
     figura.savefig(caminho, dpi=150)
     plt.close(figura)

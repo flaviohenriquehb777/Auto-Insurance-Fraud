@@ -47,13 +47,17 @@ if str(RAIZ / "src") not in sys.path:
 from quilha.avaliacao import (
     N_REAMOSTRAGENS_BOOTSTRAP,
     PERGUNTA_DE_DECISAO,
+    PERICIAS_POR_PERITO,
+    PERITOS_ATUAIS,
     aplicar_politica,
     construir_politica_campeao,
     construir_referencias,
+    curva_ganho_por_perito,
     custo_sem_pericia,
     escore_positivo,
     executar_backtest,
     janelas_walk_forward,
+    k_marginal_cruza_piso,
     medir_janela,
     medir_politicas_no_mes,
     piso_viabilidade,
@@ -63,10 +67,13 @@ from quilha.avaliacao import (
     resultado_liquido,
     resumo_parametros_decisao,
     salvar_curva_decisao,
+    salvar_ganho_por_perito,
 )
 from quilha.dados import carregar_base_crua
 from quilha.modelagem import (
     CAPACIDADE_MENSAL,
+    CUSTO_FRAUDE_PAGA,
+    CUSTO_PERICIA,
     LIMIAR_REGRA_ATUAL,
     PASTA_TABELAS,
     calcular_k_proporcional,
@@ -569,3 +576,153 @@ print(
 # A curva `Resultado(k)` marca os quatro pontos de decisão: o corte de hoje (900), o corte
 # teórico `p*`, o ótimo empírico e o último `k` ainda lucrativo — este último é o que a Parte 4
 # usa para responder "vale a pena mais peritos?".
+
+# %% [markdown]
+# ## Parte 4 — Dimensionamento da equipe e valor marginal (Pergunta 5)
+#
+# O comitê pergunta "vale a pena mais peritos?". Aqui se responde com dinheiro: o valor
+# marginal de cada perícia, a curva de ganho por perito, a contraprova da tese do Otávio
+# ("o dobro de peritos, o dobro de fraude") e a ação sobre a equipe — com número.
+
+# %%
+# =============================================================================
+# Parte 4 — Acerto mínimo de uma perícia a mais para se pagar
+# =============================================================================
+piso_marginal = piso_viabilidade()
+print("ACERTO MÍNIMO DE UMA PERÍCIA (A MAIS) PARA SE PAGAR")
+print(f"  custo de uma perícia   = R$ {CUSTO_PERICIA:,.2f}")
+print(f"  custo da fraude paga   = R$ {CUSTO_FRAUDE_PAGA:,.2f}")
+print(f"  700 / 21.700           = {piso_marginal:.6f}  ({piso_marginal * 100:.4f}%)")
+print(
+    "  É o mesmo número do piso da Fase 1: a k-ésima perícia zera o valor esperado em "
+    "p = 1/(21.700/700) = 1/31 — a mesma conta vista do lado marginal."
+)
+
+# %%
+# =============================================================================
+# Parte 4 — Valor marginal: até quanto compensa periciar e o k de menor custo
+# =============================================================================
+k_otimo = int(resumo_curva["k_otimo_empirico"])
+k_teorico = int(resumo_curva["k_corte_teorico"])
+k_lucrativo_max = int(resumo_curva["k_maximo_ainda_lucrativo"])
+k_cruza_piso = k_marginal_cruza_piso(tabela_curva)
+
+resultado_900 = float(
+    tabela_curva.loc[tabela_curva["k"] == CAPACIDADE_MENSAL, "resultado_liquido"].iloc[0]
+)
+resultado_otimo = float(
+    tabela_curva.loc[tabela_curva["k"] == k_otimo, "resultado_liquido"].iloc[0]
+)
+resultado_teorico = float(
+    tabela_curva.loc[tabela_curva["k"] == k_teorico, "resultado_liquido"].iloc[0]
+)
+ganho_alem_de_900 = resultado_otimo - resultado_900
+
+
+def _peritos(k: int) -> float:
+    """Peritos equivalentes a um `k` de perícias/mês (1 perito = 30 perícias)."""
+    return k / PERICIAS_POR_PERITO
+
+
+print("VALOR MARGINAL E LIMITES DE CAPACIDADE (curva Resultado(k), mês de teste)")
+print(f"  capacidade hoje (R$ 50 mil/900)      k={CAPACIDADE_MENSAL:>5}  ->  R$ {resultado_900:>13,.2f}")
+print(f"  ótimo empírico (maior resultado)     k={k_otimo:>5}  ->  R$ {resultado_otimo:>13,.2f}"
+      f"   ({_peritos(k_otimo):.1f} peritos)")
+print(f"  corte teórico (precisão = piso)      k={k_teorico:>5}  ->  R$ {resultado_teorico:>13,.2f}"
+      f"   ({_peritos(k_teorico):.1f} peritos)")
+print(f"  último k ainda lucrativo             k={k_lucrativo_max:>5}  ->  "
+      f"R$ {float(tabela_curva.loc[tabela_curva['k'] == k_lucrativo_max, 'resultado_liquido'].iloc[0]):>13,.2f}")
+print()
+# O resumo da curva reporta o ÚLTIMO k ainda viável (precisão marginal >= piso); a
+# função devolve a PRIMEIRA perícia que não se paga. São vizinhas por construção:
+# a última que se paga + 1 é a primeira que não se paga.
+cruza_confere = k_cruza_piso == k_teorico + 1
+print(f"  contraprova: última perícia que ainda se paga k={k_teorico} (resumo da curva); "
+      f"a primeira que não se paga é k={k_cruza_piso} "
+      f"-> {'confere (vizinhas)' if cruza_confere else 'DIVERGE'}")
+print(f"  ganho mensal além das 900: Resultado(k_ótimo) − Resultado(900) = R$ {ganho_alem_de_900:,.2f}")
+print()
+print('  "menor custo total", as duas leituras do enunciado:')
+print(f"    (A) minimizar o custo total  -> mesmo ponto de maior resultado -> k={k_otimo}"
+      f" (R$ {resultado_otimo:,.2f})")
+print(f"    (B) última perícia que ainda se paga (precisão marginal >= piso) -> k={k_teorico}"
+      f" (R$ {resultado_teorico:,.2f})")
+
+# %%
+# =============================================================================
+# Parte 4 — Curva de ganho por perito e recomendação de dimensionamento
+# =============================================================================
+quadro_peritos = curva_ganho_por_perito(tabela_curva, peritos_max=80)
+
+pontos_peritos = [
+    ("atual", PERITOS_ATUAIS),
+    ("ótimo empírico", round(_peritos(k_otimo))),
+    ("corte teórico", round(_peritos(k_teorico))),
+]
+resumo_peritos = quadro_peritos[quadro_peritos["peritos"].isin([p for _, p in pontos_peritos])]
+
+print("GANHO POR PERITO (1 perito = 30 perícias/mês)")
+print(
+    resumo_peritos[["peritos", "k", "resultado_liquido", "ganho_marginal_perito", "ganho_sobre_base"]]
+    .to_string(index=False)
+)
+print()
+marginal_atual = float(
+    quadro_peritos.loc[quadro_peritos["peritos"] == PERITOS_ATUAIS, "ganho_marginal_perito"].iloc[0]
+)
+print(f"  ganho do 30º perito (o último contratado hoje): R$ {marginal_atual:,.2f}/mês")
+print(
+    f"  a partir de {round(_peritos(k_otimo))} peritos o ganho marginal entra em platô; "
+    f"além de {round(_peritos(k_teorico))} peritos cada contratação destrói valor."
+)
+
+caminho_peritos = salvar_ganho_por_perito(quadro_peritos, dict(pontos_peritos))
+print()
+print(f"Figura salva em {caminho_peritos.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 4 — Contraprova da tese do Otávio ("o dobro de peritos, o dobro de fraude")
+# =============================================================================
+tp_900 = int(tabela_curva.loc[tabela_curva["k"] == CAPACIDADE_MENSAL, "tp"].iloc[0])
+tp_1800 = int(tabela_curva.loc[tabela_curva["k"] == 2 * CAPACIDADE_MENSAL, "tp"].iloc[0])
+promessa_otavio = 2 * tp_900
+multiplo_real = tp_1800 / tp_900
+
+print("TESTE DA AFIRMAÇÃO DO OTÁVIO (dobrar a equipe dobraria a fraude?)")
+print(f"  TP com {CAPACIDADE_MENSAL} perícias (hoje)      : {tp_900}")
+print(f"  TP com {2 * CAPACIDADE_MENSAL} perícias (dobro)      : {tp_1800}")
+print(f"  promessa de 2× implicaria                  : {promessa_otavio} fraudes")
+print(f"  múltiplo real                              : {multiplo_real:.2f}×  (prometido: 2,00×)")
+print(
+    f"  motivo econômico: o topo da fila concentra as fraudes mais óbvias, então a precisão "
+    f"marginal decresce — 900 perícias acham {tp_900} de {int(tabela_curva['tp'].iloc[-1])} fraudes."
+)
+
+# %%
+# =============================================================================
+# Parte 4 — Ação sobre a equipe (Pergunta 5)
+# =============================================================================
+print("AÇÃO RECOMENDADA SOBRE A EQUIPE")
+print(
+    f"  Manter os {PERITOS_ATUAIS} peritos ({CAPACIDADE_MENSAL} perícias/mês). O ganho de ir ao "
+    f"ótimo empírico (k={k_otimo}, ~{round(_peritos(k_otimo))} peritos) é de "
+    f"R$ {ganho_alem_de_900:,.2f}/mês — e esse ótimo é *in-sample*, dentro da faixa de variação "
+    f"das janelas do backtest."
+)
+print(
+    f"  Condição que invalidaria: se a janela de monitoramento confirmar que a precisão @900 "
+    f"segue acima de {piso_marginal * 100:.2f}% com folga, reavaliar a ampliação até ~"
+    f"{round(_peritos(k_teorico))} peritos (corte teórico, k={k_teorico})."
+)
+
+# %% [markdown]
+# **Leitura da Parte 4.** O acerto mínimo de uma perícia marginal é o mesmo piso da Fase 1
+# (3,2258%) — a mesma conta vista do lado de quem decide contratar. No mês de teste, o resultado
+# sobe de R$ 3.731.700 (k=900) até R$ 3.968.300 no ótimo empírico (k=1.430, ~48 peritos) e
+# desaparece em k=8.710. Só que o ótimo **não é estimativa fora da amostra**: é escolhido no
+# mesmo mês usado na seleção, e o ganho sobre as 900 atuais cabe dentro do desvio do backtest.
+# Por isso a ação é **manter a equipe**, não ampliar por um número bonito.
+#
+# A tese do Otávio cai por aritmética: dobrar as perícias **não** dobra as fraudes — a precisão
+# marginal decresce porque o topo da fila já concentra as fraudes mais óbvias.
