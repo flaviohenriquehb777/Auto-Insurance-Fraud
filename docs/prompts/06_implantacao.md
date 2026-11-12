@@ -462,7 +462,7 @@ próximo passo."**
 | 0 | Reconciliação e decisão pendente (ramo do gerente) | **concluída** — Ramo A (sem re-treino) |
 | 1 | Blindagem da fronteira (camadas 2 e 3 da vírgula) | **concluída** — contrato + monitor, 49 testes |
 | 2 | O app de triagem (Streamlit) | **concluída** — 3 telas, 20 testes, 126 na suíte |
-| 3 | O notebook consolidado único | pendente |
+| 3 | O notebook consolidado único | **concluída** — `06_consolidado.ipynb`, 30 células, 0 erros, 24/24 campos do Quadro, 42,27 s |
 | 4 | O resumo executivo `.docx` | pendente |
 | 5 | Verificação final e encerramento | pendente |
 

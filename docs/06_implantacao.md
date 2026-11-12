@@ -195,6 +195,69 @@ auditada.
 
 ***
 
+## Parte 3 — O notebook consolidado único · CONCLUÍDA
+
+O entregável de maior peso é **um único notebook que conta o case inteiro**, das Fases 1 a 6,
+sem infraestrutura nem credencial: ele **roda de ponta a ponta e imprime os números** que a
+diretoria cobra. Não é um relatório — é a **prova reprodutível** do resultado.
+
+| Arquivo | Papel |
+|---|---|
+| [notebooks/clean/06_consolidado.py](../notebooks/clean/06_consolidado.py) | Fonte Jupytext (percent). É a peça versionada e revisável no Git. |
+| `06_consolidado.ipynb` (raiz) | Notebook **executado**, entregável local (ignorado pelo Git via `/*.ipynb`). |
+
+```bash
+uv run jupytext --to notebook --execute notebooks/clean/06_consolidado.py -o 06_consolidado.ipynb
+```
+
+### As sete seções (0 a 7), no rastro das cinco perguntas do comitê
+
+0. **Setup** — raiz tolerante ao caminho, `SEED=42`, versões e cronômetro.
+1. **Negócio** — parâmetros do case, piso `p*` e a pergunta que encerra tudo.
+2. **Dados e colunas** (Pergunta 1) — leitura crua e a **ablação de idade/UF** com o mesmo protocolo.
+3. **Análise descritiva** (Pergunta 2) — taxas por tipo, canal, boletim, tempo de apólice e valor reclamado, calculadas da base crua.
+4. **Modelagem** (Pergunta 3) — seis modelos, o campeão e o confronto treino (CV) × teste (holdout).
+5. **Avaliação** (Perguntas 4 e 5) — política, economia, curva `Resultado(k)`, sensibilidade, bootstrap, backtest e disparidade.
+6. **Implantação** (Fase 6) — identidade do artefato, contrato na fronteira, app, governança, SHAP e MLOps.
+7. **Quadro de Respostas** — os **24 campos**, medidos e impressos, e o tempo real.
+
+### Evidência real (inspeção do `.ipynb` executado, nada digitado à mão)
+
+| Verificação | Resultado real |
+|---|---|
+| Células | **30** (22 código + 8 markdown) |
+| Células com erro | **0** |
+| Campos do Quadro impressos | **24 de 24** |
+| Tempo real de execução | **42,27 s** |
+| Contrato na fronteira (payload inválido) | `1 erro` listado → `pontuar_lote RECUSOU o lote inteiro (fail closed)` |
+| Conferência do valor da política | `TP=201`, `periciados=900`, precisão 22,33%, **R$ 3.731.700,00**, `confere=True` |
+| Hash do `.joblib` | `65c7eb5e…bb10a3` |
+| MLOps (sem degradação neste ambiente) | credenciais presentes → run real; `log_metricas` levantou `TypeError`, **capturado** — o notebook seguiu sem quebrar |
+
+### Divergências honestas — três números que não "fecham" ao pé da letra
+
+Registradas dentro do próprio notebook, porque **procedência distinta não é erro**:
+
+1. **Capacidade do lote: `891 × 900`.** A regra **D4** aplica `round(900 × 11.904 / 12.024) = 891`
+   (proporcional ao lote de agosto); o corte auditado fixa a **capacidade mensal cheia** de 900.
+   Já explicado na Parte 2 — não se contradizem.
+2. **Regra atual: `927 × ~950`.** `regra_atual_do_case` gera **927** pedidos acima do limiar de
+   R$ 50 mil; o texto do case fala em "~950" — arredondamento da narrativa.
+3. **Métricas de treino: CV × recomputação.** O notebook usa a **média da CV de 5 folds**
+   (ROC 0.940794 · PR 0.519659), não o resultado direto no treino ajustado. Ambas são válidas;
+   a **procedência** é que muda.
+
+### Critério de saída — atendido
+
+| Critério do prompt | Resultado |
+|---|---|
+| Roda de ponta a ponta **sem credencial** | **atendido** — o MLOps degrada para `sqlite:///mlflow.db`; o `try/except` prova a degradação |
+| Imprime os **24 números** do Quadro | **atendido** — 24/24 campos impressos |
+| Mede e registra o **tempo real** | **atendido** — **42,27 s** |
+| Contrato recusa dado inválido (saída real) | **atendido** — `RECUSOU o lote inteiro (fail closed)` |
+
+***
+
 ## Progresso
 
 | Parte | Descrição | Status |
@@ -202,6 +265,6 @@ auditada.
 | 0 | Reconciliação e decisão pendente | **concluída** — Ramo A |
 | 1 | Blindagem da fronteira (camadas 2 e 3 da vírgula) | **concluída** — contrato + monitor, 49 testes |
 | 2 | O app de triagem (Streamlit) | **concluída** — 3 telas, 20 testes, 126 na suíte |
-| 3 | O notebook consolidado único | pendente |
+| 3 | O notebook consolidado único | **concluída** — 30 células, 0 erros, 24/24 campos, 42,27 s |
 | 4 | O resumo executivo `.docx` | pendente |
 | 5 | Verificação final e encerramento | pendente |
