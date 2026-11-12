@@ -2,8 +2,9 @@
 
 **Projeto:** Detecção de fraude em sinistros de automóvel — Quilha Seguros
 **Fase:** 6 de 6 (CRISP-DM — Implantação; a fase que põe o resultado em uso)
-**Status:** não iniciada — aguarda a resposta do gerente de sinistros sobre a premissa
-temporal de três preditoras (ver Parte 0) e a autorização expressa do responsável do projeto
+**Status:** em andamento — **Parte 0 concluída** (Ramo A: o gerente confirmou a premissa
+temporal das três preditoras; sem re-treino). Partes 1 a 5 pendentes, uma a uma, com autorização
+a cada passo
 **Pré-requisito:** Fase 5 **concluída e mergeada na `main`** (PR #2), com o parecer em
 `docs/05_avaliacao.md`, o Quadro de Respostas preenchido (24 campos), o campeão em
 `models/pipeline_fraude.joblib` e as tabelas `reports/tabelas/avaliacao_*.csv`.
@@ -458,7 +459,7 @@ próximo passo."**
 
 | Parte | Descrição | Status |
 |---|---|---|
-| 0 | Reconciliação e decisão pendente (ramo do gerente) | pendente |
+| 0 | Reconciliação e decisão pendente (ramo do gerente) | **concluída** — Ramo A (sem re-treino) |
 | 1 | Blindagem da fronteira (camadas 2 e 3 da vírgula) | pendente |
 | 2 | O app de triagem (Streamlit) | pendente |
 | 3 | O notebook consolidado único | pendente |
