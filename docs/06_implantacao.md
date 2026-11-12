@@ -72,12 +72,69 @@ travada.
 
 ***
 
+## Parte 1 — Blindagem da fronteira (camadas 2 e 3 da vírgula) · CONCLUÍDA
+
+A porta única de entrada sempre foi `pipeline.predict`; o que faltava era **fechar a porta a dado
+inválido em vez de prever errado**. Duas camadas novas, ambas comentadas em português:
+
+| Camada | Onde vive | O que faz |
+|---|---|---|
+| 2 — contrato na fronteira | [src/quilha/contrato.py](../src/quilha/contrato.py) | Valida os **14 campos de abertura**; se um número não converte, **recusa com erro explícito** e diz qual linha do lote falhou. **Nunca imputa na fronteira.** |
+| 3 — alarme no silêncio | [src/quilha/monitoramento.py](../src/quilha/monitoramento.py) | Mede a **fração imputada por feature** a cada lote; acima de **5%** dispara alerta de *"problema de dado, não de fraude"*. |
+
+### Bateria adversarial (saída real, nada digitado à mão)
+
+| Entra em `valor_reclamado` | `_numero` devolve | Veredito do contrato |
+|---|---|---|
+| `'8837,07'` | 8837.07 | **ACEITO** |
+| `'8837.07'` | 8837.07 | **ACEITO** |
+| `'21.700,00'` | `<NA>` | **RECUSADO** — não converte (formatos aceitos: `'8837,07'` ou `'8837.07'`) |
+| `'R$ 100,00'` | `<NA>` | **RECUSADO** — não converte |
+| `'1.234'` | 1.234 | **ACEITO** (risco de 1.000× documentado) |
+| `''` / `None` | `<NA>` | **RECUSADO** — vazio: o contrato não imputa |
+
+Outros campos: `data_abertura='13:53'` e `'18/07/2026'` → **recusados** (só ISO `AAAA-MM-DD`);
+`hora_ocorrencia='99:99'` → **recusado**; `uf='XX'`, `tipo_sinistro='Batida'`,
+`canal_abertura=''` → **recusados**; `boletim_ocorrencia=''` → **ACEITO** (branco é caso de
+negócio e vira "Não informado"); coluna ausente → erro `'(ausente)'` com o nome do campo.
+
+### Monitor de imputação (camada 3)
+
+| Cenário | Resultado real |
+|---|---|
+| Mês de teste real (11.904 sinistros) | **0 imputações** em todas as features — alertas `[]` |
+| Lote com `valor_reclamado` em branco (100 sinistros) | **3 features** sinalizadas a **100%** (`valor_reclamado`, `razao_reclamado_fipe`, `faixa_valor_reclamado`) |
+
+Um único branco em `valor_reclamado` contamina as **três features** que dependem dele — por isso o
+monitor denuncia o campo de origem, não só a coluna derivada.
+
+### Achado real que mudou o desenho
+
+`pd.to_datetime("13:53", format="mixed")` **não** devolve `NaT`: resolve para **hoje às 13:53**; e
+`"03/04/2026"` seria lido como **4 de março**. Era uma **falha silenciosa de verdade** (data virava
+o dia da execução). Correção: o contrato aceita **apenas** data ISO explícita `AAAA-MM-DD` ou um
+objeto `datetime.date`/`Timestamp`.
+
+### Critério de saída — atendido
+
+| Critério do prompt | Resultado |
+|---|---|
+| `'21.700,00'` ou `'R$ 100,00'` recusado com erro explícito | **atendido** (linha a linha, acima) |
+| `'8837,07'` aceito e prevê corretamente | **atendido** (payload de 14 colunas prevê igual à linha crua completa) |
+| Teste que trava o contrato no CI | **atendido** — [tests/test_contrato.py](../tests/test_contrato.py), **49 testes** |
+| Monitor imprime a fração por feature | **atendido** (tabela acima) |
+
+Verificação de qualidade: `ruff check src tests` → **All checks passed!**; `pytest -q` →
+**106 passed in 25.60s**.
+
+***
+
 ## Progresso
 
 | Parte | Descrição | Status |
 |---|---|---|
 | 0 | Reconciliação e decisão pendente | **concluída** — Ramo A |
-| 1 | Blindagem da fronteira (camadas 2 e 3 da vírgula) | pendente |
+| 1 | Blindagem da fronteira (camadas 2 e 3 da vírgula) | **concluída** — contrato + monitor, 49 testes |
 | 2 | O app de triagem (Streamlit) | pendente |
 | 3 | O notebook consolidado único | pendente |
 | 4 | O resumo executivo `.docx` | pendente |

@@ -460,7 +460,7 @@ próximo passo."**
 | Parte | Descrição | Status |
 |---|---|---|
 | 0 | Reconciliação e decisão pendente (ramo do gerente) | **concluída** — Ramo A (sem re-treino) |
-| 1 | Blindagem da fronteira (camadas 2 e 3 da vírgula) | pendente |
+| 1 | Blindagem da fronteira (camadas 2 e 3 da vírgula) | **concluída** — contrato + monitor, 49 testes |
 | 2 | O app de triagem (Streamlit) | pendente |
 | 3 | O notebook consolidado único | pendente |
 | 4 | O resumo executivo `.docx` | pendente |
