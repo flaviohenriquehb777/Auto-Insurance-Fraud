@@ -228,7 +228,7 @@ uv run jupytext --to notebook --execute notebooks/clean/06_consolidado.py -o 06_
 | Células | **30** (22 código + 8 markdown) |
 | Células com erro | **0** |
 | Campos do Quadro impressos | **24 de 24** |
-| Tempo real de execução | **42,27 s** |
+| Tempo real de execução | **48,53 s** |
 | Contrato na fronteira (payload inválido) | `1 erro` listado → `pontuar_lote RECUSOU o lote inteiro (fail closed)` |
 | Conferência do valor da política | `TP=201`, `periciados=900`, precisão 22,33%, **R$ 3.731.700,00**, `confere=True` |
 | Hash do `.joblib` | `65c7eb5e…bb10a3` |
@@ -253,8 +253,71 @@ Registradas dentro do próprio notebook, porque **procedência distinta não é 
 |---|---|
 | Roda de ponta a ponta **sem credencial** | **atendido** — o MLOps degrada para `sqlite:///mlflow.db`; o `try/except` prova a degradação |
 | Imprime os **24 números** do Quadro | **atendido** — 24/24 campos impressos |
-| Mede e registra o **tempo real** | **atendido** — **42,27 s** |
+| Mede e registra o **tempo real** | **atendido** — **48,53 s** |
 | Contrato recusa dado inválido (saída real) | **atendido** — `RECUSOU o lote inteiro (fail closed)` |
+
+***
+
+## Parte 4 — O resumo executivo (`.docx`) · CONCLUÍDA
+
+O segundo entregável do case é um resumo executivo de **1–2 páginas** em **DOCX**, dividido nas
+**cinco perguntas do comitê** e fechado pelo **Quadro de Respostas** (24 campos, fora do limite de
+2 páginas). Ele não recria número nenhum: é montado a partir da **mesma fonte única** que o
+notebook usa — o CSV `reports/tabelas/avaliacao_quadro_respostas.csv` —, de modo que `.docx` e
+`.ipynb` **não podem divergir por construção**.
+
+| Arquivo | Papel |
+|---|---|
+| [src/quilha/relatorio.py](../src/quilha/relatorio.py) | Gerador do `.docx` a partir do CSV (fonte única). |
+| [tests/test_relatorio.py](../tests/test_relatorio.py) | 6 testes: leitura do CSV, agrupamento em 5 partes e estrutura do documento. |
+| `Relatorio_Quilha_Fraude.docx` (raiz) | **Entregável** gerado (ignorado pelo Git via `/*.docx`). |
+
+```bash
+# O pacote vive em src/ (não instalado como pacote): PYTHONPATH resolve o import.
+$env:PYTHONPATH="src"; uv run python -m quilha.relatorio
+# -> Relatório gerado: Relatorio_Quilha_Fraude.docx
+```
+
+### As cinco partes + o Quadro (cada uma com o número medido)
+
+| Parte | Pergunta do comitê | Número que sustenta |
+|---|---|---|
+| P1 | Quais variáveis entram no modelo | **18 features**; colunas fora e idade/UF **com** e **sem** (ROC/PR) |
+| P2 | O que a base revela sobre o risco | Taxas por grupo; faixa **40–50 mil a 25,15%** |
+| P3 | Qual modelo e como ele performa | Modelos comparados; **XGBoost**; ROC/PR de treino e teste |
+| P4 | Qual política adotar e quanto rende | **201 fraudes**, **R$ 3.731.700** × **−R$ 326.200**, ganho **R$ 4.057.900** |
+| P5 | Quantas perícias manter e até onde vale | Acerto mínimo **3,23%**, **k=1.430**, **235 fraudes a 1.800** |
+
+### Regra de ouro — conferência campo a campo
+
+Cada uma das 24 respostas do CSV foi procurada, uma por uma, no `.ipynb` executado **e** no
+`.docx`. Saída real do script de conferência:
+
+```
+linhas do CSV                : 24
+partes no .docx              : 5
+tabelas no .docx             : 1 (linhas: [25])
+respostas AUSENTES no .ipynb : 0 []
+respostas AUSENTES no .docx  : 0 []
+OK
+```
+
+A conferência **pegou uma divergência real** antes de fechar: 3 respostas existiam no CSV (escrito
+pela Fase 5) mas eram **recomputadas com texto diferente** pelo notebook 06 — duas usavam **ponto**
+decimal (`.6f`) onde o CSV usa **vírgula**, e uma omitia a frase *"0,9% do desvio do bootstrap"*.
+Corrigi o 06 para **reproduzir o artefato auditado** (helper `fracao_pt` + duas frases alinhadas) e
+reexecutei o notebook: **0 erros**, as 24 linhas, agora com fidelidade total. É por isso que a
+conferência aponta **0 ausentes nos dois lados** — o `.docx` não "conserta" o `.ipynb`: os dois
+passam a dizer exatamente o mesmo.
+
+### Critério de saída — atendido
+
+| Critério do prompt | Resultado |
+|---|---|
+| `.docx` com as **5 partes + Quadro** | **atendido** — 5 partes + tabela de **25 linhas** (cabeçalho + 24) |
+| Números conferidos contra as saídas do `.ipynb` | **atendido** — `0` respostas ausentes no `.ipynb` e no `.docx` |
+| `python-docx` no `pyproject.toml` | **atendido** — grupo `dev`, `python-docx==1.2.0` (+ `lxml==6.1.3`) |
+| Suíte verde com os testes novos | **atendido** — `ruff check src tests` → *All checks passed!*; `pytest -q` → **132 passed** |
 
 ***
 
@@ -265,6 +328,6 @@ Registradas dentro do próprio notebook, porque **procedência distinta não é 
 | 0 | Reconciliação e decisão pendente | **concluída** — Ramo A |
 | 1 | Blindagem da fronteira (camadas 2 e 3 da vírgula) | **concluída** — contrato + monitor, 49 testes |
 | 2 | O app de triagem (Streamlit) | **concluída** — 3 telas, 20 testes, 126 na suíte |
-| 3 | O notebook consolidado único | **concluída** — 30 células, 0 erros, 24/24 campos, 42,27 s |
-| 4 | O resumo executivo `.docx` | pendente |
+| 3 | O notebook consolidado único | **concluída** — 30 células, 0 erros, 24/24 campos, 48,53 s |
+| 4 | O resumo executivo `.docx` | **concluída** — 5 partes + Quadro, `0` ausentes nos dois lados, 6 testes |
 | 5 | Verificação final e encerramento | pendente |

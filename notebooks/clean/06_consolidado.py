@@ -315,6 +315,11 @@ def pct_pt(taxa: float) -> str:
     return f"{taxa * 100:.2f}%".replace(".", ",")
 
 
+def fracao_pt(valor: float, casas: int = 6) -> str:
+    """Fração com vírgula decimal, como no Quadro da Fase 5: `0.519659` -> `0,519659`."""
+    return f"{valor:.{casas}f}".replace(".", ",")
+
+
 def brl(valor: float) -> str:
     """Reais no padrão brasileiro: `3731700.0` -> `R$ 3.731.700,00`."""
     texto = f"{abs(valor):,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
@@ -746,7 +751,7 @@ respostas_quadro = {
     + " (chaves de controle, vazamento e a original redundante `terceiro_identificado`)",
     "idade_uf_decisao": (
         f"Manter: remover `uf` + `idade_segurado` vale {brl(abs(preco_de_remover))}/mês A FAVOR "
-        f"da remoção (empate técnico) e o PR AUC cai sem elas."
+        f"da remoção (empate técnico, 0,9% do desvio do bootstrap) e o PR AUC cai sem elas."
     ),
     "auc_teste_idade_uf": (
         f"Com idade e UF — ROC {metricas_teste['roc_auc']:.6f} · PR {metricas_teste['pr_auc']:.6f}; "
@@ -778,12 +783,12 @@ respostas_quadro = {
         f"{pct_pt(float(y_teste.mean()))} de fraude)."
     ),
     "referencia_simples": (
-        f"ROC AUC {linha_dummy['roc_auc_cv_media']:.6f} · PR AUC "
-        f"{linha_dummy['pr_auc_cv_media']:.6f} (DummyClassifier prior)."
+        f"ROC AUC {fracao_pt(linha_dummy['roc_auc_cv_media'])} · PR AUC "
+        f"{fracao_pt(linha_dummy['pr_auc_cv_media'])} (DummyClassifier prior)."
     ),
     "auc_recomendado": (
-        f"Treino — ROC {linha_campeao_cv['roc_auc_cv_media']:.6f} · PR "
-        f"{linha_campeao_cv['pr_auc_cv_media']:.6f}; teste — ROC {metricas_teste['roc_auc']:.6f} · "
+        f"Treino — ROC {fracao_pt(linha_campeao_cv['roc_auc_cv_media'])} · PR "
+        f"{fracao_pt(linha_campeao_cv['pr_auc_cv_media'])}; teste — ROC {metricas_teste['roc_auc']:.6f} · "
         f"PR {metricas_teste['pr_auc']:.6f}."
     ),
     "politica_recomendada": (
