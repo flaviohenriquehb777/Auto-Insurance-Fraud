@@ -53,6 +53,13 @@ models/*
 .env
 .env.*
 
+# ---- Entregáveis locais na raiz (não versionados) ----
+# O resumo executivo (.docx) e o notebook consolidado (.ipynb) são entregáveis
+# locais que ficam na raiz do projeto e NÃO entram no versionamento: o resultado
+# é reproduzível pelo notebook-fonte em `notebooks/clean/` e pelo código em `src/`.
+/*.docx
+/*.ipynb
+
 # ---- Sistema operacional e IDE ----
 .DS_Store
 Thumbs.db

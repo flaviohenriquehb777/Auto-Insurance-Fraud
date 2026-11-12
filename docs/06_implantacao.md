@@ -129,13 +129,79 @@ Verificação de qualidade: `ruff check src tests` → **All checks passed!**; `
 
 ***
 
+## Parte 2 — O app de triagem (Streamlit) · CONCLUÍDA
+
+O app **não decide fraude**: ele **prioriza** a fila, **explica** por que um sinistro subiu e
+**mostra o valor** da política. A decisão de periciar é humana — a mensagem permanente de todas
+as telas é *"O modelo ordena, a política decide, o perito confirma."*
+
+| Arquivo | Papel |
+|---|---|
+| [src/quilha/app.py](../src/quilha/app.py) | Toda a lógica como **função pura** (testável sem UI) + as três telas em `main()`. O `streamlit` só é importado dentro de `main()`. |
+| [app.py](../app.py) | Lançador da raiz (`streamlit run app.py`): põe `src/` no caminho de importação, sem regra de negócio. |
+| [tests/test_app.py](../tests/test_app.py) | **20 testes** de nível de função — porta, fila, linguagem e número. |
+
+### As três telas
+
+1. **Fila do mês** — recebe o lote, passa pelo contrato (camada 2), pontua, ordena por escore e
+   corta em `k`; exporta a fila em CSV.
+2. **Sinistro individual** — escore, posição na fila, faixa de prioridade e os sinais SHAP em
+   linguagem de priorização.
+3. **Valor e governança** — o ganho em reais com IC, o valor por sinistro, a saúde do modelo
+   (hash + imputações) e os gatilhos de circuit breaker.
+
+### Decisões de implantação travadas (levadas ao resumo da diretoria)
+
+| # | Decisão | Razão de mundo real |
+|---|---|---|
+| **D1** | Lote com linha inválida **recusa o lote inteiro** (*fail closed*) | A fila é uma ordenação sobre o **universo fechado do mês**: omitir linhas em silêncio pode omitir a fraude. O app devolve a **lista de erros por linha** (campo, valor, motivo) em CSV para correção rápida. |
+| **D2** | Semáforo **por posição, nunca por culpa** | 🔴 = dentro da capacidade (`posição ≤ k`); 🟡 = até `2 × k` (capacidade do mês seguinte); 🟢 = o resto. É posição em fila de trabalho, não veredito sobre a pessoa. |
+| **D3** | Valor por sinistro como **faixa**, com a **taxa observada** ao lado | A probabilidade do campeão **não é calibrada** (Brier 0,014702 sem calibração vs 0,014688 com isotonic — ganho de 0,000011; sigmoid piora para 0,015210). O número aparece como estimativa, ancorado na taxa observada da faixa de escore. |
+| **D4** | Capacidade **proporcional ao lote**: `k = 900 × n / 12.024` | Mantém a **taxa de perícia** (900/12.024 = 7,485%) constante. É o que preserva a economia auditada: periciar mais fundo na fila derruba a precisão abaixo dos 22,33% medidos. |
+
+### Evidência real (saída do `pytest` e do smoke test, nada digitado à mão)
+
+| Verificação | Resultado real |
+|---|---|
+| `ruff check src tests` | **All checks passed!** |
+| `pytest tests/test_app.py -q` | **20 passed in 3.45s** |
+| `pytest -q` (suíte completa) | **126 passed in 17.87s** |
+| Fila do mês de teste (11.904 sinistros) | ordenada pelo escore; corte em `k = 891`; topo = `SIN-26-100637` (escore 0,956084); **201 fraudes** nas primeiras posições (**22,56%** de acerto) |
+| Sinistro individual (topo) | escore 0,956084 · valor bruto R$ 20.047,02 · faixa 0,1802 com **taxa observada 17,88%** → R$ 3.180,86 · piso 3,2258% |
+| A porta (lote com `valor_reclamado='21.700,00'` e `uf='ZZ'`) | **42 erros** de contrato listados por linha/campo/valor; **nenhuma** predição emitida |
+| Conferência do artefato | `TP=201`, `periciados=900`, **R$ 3.731.700,00**, `confere=True` |
+| Hash do `.joblib` implantado | `65c7eb5e…bb10a3` |
+| Saúde e drift | 0 imputações e `alertas=[]` no mês de teste; PSI ≤ 0,0079 em todas as features (**estável**) |
+
+### Um ponto de atenção honesto: 891 × 900
+
+A tela de fila aplica **D4** e corta o lote de agosto (11.904 sinistros, ~1% abaixo do mês de
+referência de 12.024) em **891 perícias**; a **conferência do artefato** usa `k = 900`, que é a
+capacidade cheia com que a Fase 5 mediu o `Resultado@900`. Os dois números **não se contradizem**:
+o primeiro é a fila **operacional** proporcional ao lote; o segundo é a **reprodução do número
+auditado**. O topo da fila é idêntico nos dois casos (as 201 fraudes estão nas primeiras
+posições), então o acerto não muda — só as 9 últimas perícias do corte. A decisão de manter a
+proporcionalidade é deliberada: é ela que conserva a **taxa** de perícia e, com ela, a economia
+auditada.
+
+### Critério de saída — atendido
+
+| Critério do prompt | Resultado |
+|---|---|
+| O app sobe local e prioriza uma fila de exemplo | **atendido** (fila do mês de teste acima) |
+| Mostra escore + SHAP + faixa para um sinistro individual | **atendido** (escore, posição, faixa e sinais SHAP) |
+| Exibe o painel de valor com os números reais | **atendido** (R$ 3.731.700 × −R$ 326.200, IC e conferência `confere=True`) |
+| **Sem** afirmar fraude em nenhum ponto | **atendido** — teste `test_rotulos_e_mensagem_permanente_nao_acusam_ninguem` |
+
+***
+
 ## Progresso
 
 | Parte | Descrição | Status |
 |---|---|---|
 | 0 | Reconciliação e decisão pendente | **concluída** — Ramo A |
 | 1 | Blindagem da fronteira (camadas 2 e 3 da vírgula) | **concluída** — contrato + monitor, 49 testes |
-| 2 | O app de triagem (Streamlit) | pendente |
+| 2 | O app de triagem (Streamlit) | **concluída** — 3 telas, 20 testes, 126 na suíte |
 | 3 | O notebook consolidado único | pendente |
 | 4 | O resumo executivo `.docx` | pendente |
 | 5 | Verificação final e encerramento | pendente |

@@ -21,6 +21,7 @@ dependencies = [
     "joblib>=1.6.0",
     "xgboost>=3.4.1",
     "lightgbm>=4.7.0",
+    "streamlit>=1.67.0",
 ]
 
 [dependency-groups]
