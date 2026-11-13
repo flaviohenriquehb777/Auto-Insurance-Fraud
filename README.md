@@ -14,11 +14,11 @@
 
 <p align="center">
   <a href="https://quilha-triagem.streamlit.app/">
-    <img src="assets/previews/app-valor.png" alt="Captura real da tela Valor e governança do app Quilha, com os resultados do mês de teste. Clique para abrir a demonstração interativa." width="900">
+    <img src="reports/figures/05_01_curva_resultado_k.png" alt="Curva Resultado(k) do campeão no mês de teste — clique para abrir a demonstração interativa." width="900">
   </a>
 </p>
 
-<p align="center"><a href="https://quilha-triagem.streamlit.app/"><strong>▶ Abrir demonstração interativa</strong></a> — captura estática acima é da tela <em>Valor e governança</em>.</p>
+<p align="center"><a href="https://quilha-triagem.streamlit.app/"><strong>▶ Abrir demonstração interativa</strong></a> — a curva acima mostra o resultado líquido em função do número de perícias (k); o pico marca a capacidade mensal de 900 perícias.</p>
 
 > **Escopo:** projeto de estudo de caso, não é um sistema de decisão autônoma nem um serviço de produção. O modelo prioriza a fila; a decisão de periciar continua humana.
 
@@ -194,11 +194,15 @@ Este projeto está licenciado sob a [MIT License](LICENSE).
 
 ## Contato
 
+<div align="center">
+
 | Canal | Link / contato |
 |---|---|
 | Nome | Flávio Henrique Barbosa |
 | LinkedIn | [linkedin.com/in/flavio-henrique-barbosa-38465938](https://www.linkedin.com/in/flavio-henrique-barbosa-38465938) |
 | E-mail | [flaviohenriquehb777@outlook.com](mailto:flaviohenriquehb777@outlook.com) |
+
+</div>
 
 <p align="center">
   <a href="https://www.linkedin.com/in/flavio-henrique-barbosa-38465938">
