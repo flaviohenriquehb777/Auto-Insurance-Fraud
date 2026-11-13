@@ -374,6 +374,37 @@ segundo está empilhado sobre o primeiro, a sequência profissional é integrar 
 depois, atualizar o destino do PR da Fase 6 para `main`, validar CI e só então considerar o merge.
 Nenhuma dessas alterações remotas foi feita nesta etapa.
 
+### Publicação no Streamlit Community Cloud · CONCLUÍDA (13/11/2026)
+
+O app foi publicado e validado no Streamlit Community Cloud a partir da branch
+`feature/fase-6-implantacao`, sem merge na `main` (conforme combinado: publicar antes do aceite
+visual final).
+
+**Configuração do deploy:**
+
+| Item | Valor |
+|---|---|
+| Repositório | `flaviohenriquehb777/Auto-Insurance-Fraud` |
+| Branch | `feature/fase-6-implantacao` |
+| Entrypoint | `app.py` |
+| Python | 3.12 |
+| Secrets | vazio (o app não usa credenciais) |
+| URL pública | **https://quilha-triagem.streamlit.app/** |
+
+O Cloud detectou o `uv.lock` (prioridade máxima sobre `pyproject.toml`) e instalou as ~188
+dependências via `uv sync`. O `app.py` na raiz injeta `src/` no `sys.path`, então o pacote
+`quilha` é importável sem `PYTHONPATH`. Nenhum `requirements.txt` foi necessário.
+
+**Smoke test no ambiente publicado (evidência real):**
+
+| Tela | Verificação |
+|---|---|
+| Fila do mês | 11.904 sinistros de ago/2026 carregados; `k=891` (900 × 11.904 / 12.024); 201 fraudes nas 891 primeiras posições (22,56%); tabela e exportação CSV funcionam |
+| Valor e governança | Política **R$ 3.731.700**, regra atual **R$ −326.200**, ganho **R$ 4.057.900**, IC 95% **[R$ 3.537.100; R$ 4.665.500]** — todos os valores em pt-BR e idênticos aos auditados |
+| Sinistro individual | SHAP calculado e gráfico de contribuições renderizado; valor esperado R$ −273,87; o `import shap` dinâmico funciona no Cloud |
+
+O favicon (`assets/brand/favicon.png`) e os assets estão versionados e servidos corretamente.
+
 ***
 
 ## Progresso
@@ -385,4 +416,4 @@ Nenhuma dessas alterações remotas foi feita nesta etapa.
 | 2 | O app de triagem (Streamlit) | **concluída** — 3 telas, 20 testes, 126 na suíte |
 | 3 | O notebook consolidado único | **concluída** — 30 células, 0 erros, 24/24 campos, 79,20 s |
 | 4 | O resumo executivo `.docx` | **concluída** — 5 partes + Quadro, `0` ausentes nos dois lados, 6 testes |
-| 5 | Verificação final e encerramento | **concluída documentalmente** — Ruff verde, 133 testes, entregáveis conferidos; UAT e publicação pendentes |
+| 5 | Verificação final e encerramento | **concluída documentalmente** — Ruff verde, 133 testes, entregáveis conferidos; app publicado em https://quilha-triagem.streamlit.app/ (smoke test das 3 telas OK); UAT pendente |

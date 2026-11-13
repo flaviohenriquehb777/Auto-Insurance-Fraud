@@ -13,10 +13,12 @@
 </p>
 
 <p align="center">
-  <img src="assets/previews/app-valor.png" alt="Captura real da tela Valor e governança do app Quilha, com os resultados do mês de teste" width="900">
+  <a href="https://quilha-triagem.streamlit.app/">
+    <img src="assets/previews/app-valor.png" alt="Captura real da tela Valor e governança do app Quilha, com os resultados do mês de teste. Clique para abrir a demonstração interativa." width="900">
+  </a>
 </p>
 
-<p align="center"><em>Prévia estática do app local. A demonstração interativa será vinculada após validação e publicação.</em></p>
+<p align="center"><a href="https://quilha-triagem.streamlit.app/"><strong>▶ Abrir demonstração interativa</strong></a> — captura estática acima é da tela <em>Valor e governança</em>.</p>
 
 > **Escopo:** projeto de estudo de caso, não é um sistema de decisão autônoma nem um serviço de produção. O modelo prioriza a fila; a decisão de periciar continua humana.
 
@@ -179,9 +181,12 @@ pode publicar uma página de apresentação e documentação do projeto. A demon
 ser implantada separadamente, por exemplo no
 [Streamlit Community Cloud](https://docs.streamlit.io/deploy/streamlit-community-cloud).
 
-No momento, **nenhum dos dois endereços públicos foi configurado**. A publicação fica pendente da
-validação manual do app; depois disso, o link da demonstração poderá ser adicionado ao README e a
-captura acima poderá se tornar clicável. Não há URL de app ao vivo a divulgar nesta etapa.
+A demonstração interativa está publicada em:
+
+> **[quilha-triagem.streamlit.app](https://quilha-triagem.streamlit.app/)**
+
+A captura no topo deste README é clicável e leva direto ao app. O deploy é feito a partir da
+branch `feature/fase-6-implantacao`, com Python 3.12 e dependências resolvidas pelo `uv.lock`.
 
 ## Licença
 
