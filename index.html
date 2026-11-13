@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quilha Seguros · Triagem de perícia</title>
+  <meta name="description" content="Priorização de perícias em sinistros de automóvel com machine learning. Estudo de caso CRISP-DM.">
+  <link rel="icon" href="assets/brand/favicon.png" type="image/png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --muted: #94a3b8;
+      --text: #e2e8f0;
+      --accent: #38bdf8;
+      --green: #22c55e;
+      --red: #ef4444;
+      --yellow: #eab308;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .container { max-width: 960px; margin: 0 auto; padding: 3rem 1.5rem; }
+    header { text-align: center; margin-bottom: 2rem; }
+    h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .subtitle { color: var(--muted); font-size: 1.1rem; margin-bottom: 1.5rem; }
+    .badges { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; margin-bottom: 2rem; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 0.3rem;
+      background: var(--card); border-radius: 6px; padding: 0.3rem 0.7rem;
+      font-size: 0.85rem; color: var(--muted);
+    }
+    .preview {
+      border-radius: 16px; overflow: hidden; margin-bottom: 2rem;
+      border: 1px solid #334155; transition: transform 0.2s, box-shadow 0.2s;
+      display: block; text-decoration: none; color: inherit;
+    }
+    .preview:hover { transform: translateY(-2px); box-shadow: 0 10px 30px rgba(56, 189, 248, 0.15); }
+    .preview img { width: 100%; display: block; }
+    .preview-caption { padding: 0.8rem; text-align: center; background: var(--card); color: var(--accent); font-weight: 600; }
+    h2 { font-size: 1.3rem; margin: 2rem 0 1rem; border-bottom: 1px solid #334155; padding-bottom: 0.5rem; }
+    p { margin-bottom: 1rem; color: var(--muted); }
+    .cta {
+      display: inline-block; background: var(--accent); color: #0f172a;
+      font-weight: 700; padding: 0.8rem 1.8rem; border-radius: 8px;
+      text-decoration: none; margin: 1rem 0; transition: opacity 0.2s;
+    }
+    .cta:hover { opacity: 0.9; }
+    .results { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin: 1rem 0; }
+    .result-card { background: var(--card); padding: 1.2rem; border-radius: 10px; text-align: center; }
+    .result-value { font-size: 1.5rem; font-weight: 700; color: var(--accent); }
+    .result-label { font-size: 0.85rem; color: var(--muted); margin-top: 0.3rem; }
+    .links { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1rem; }
+    .links a { color: var(--accent); text-decoration: none; }
+    .links a:hover { text-decoration: underline; }
+    .scope {
+      background: var(--card); border-left: 3px solid var(--yellow);
+      padding: 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem;
+    }
+    footer { margin-top: 3rem; text-align: center; color: var(--muted); font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Priorização de Perícias em Sinistros de Automóvel</h1>
+      <p class="subtitle"><strong>Quilha Seguros</strong> · Política de triagem orientada por dados, com capacidade mensal limitada</p>
+      <div class="badges">
+        <span class="badge">Python 3.12</span>
+        <span class="badge">Streamlit 1.67</span>
+        <span class="badge">XGBoost</span>
+        <span class="badge">Licença MIT</span>
+      </div>
+    </header>
+
+    <a href="https://quilha-triagem.streamlit.app/" class="preview" target="_blank" rel="noopener">
+      <img src="assets/previews/app-valor.png" alt="Prévia do app Quilha — tela Valor e governança">
+      <div class="preview-caption">▶ Abrir o app interativo (Streamlit Cloud)</div>
+    </a>
+
+    <div class="scope">
+      <strong>Escopo:</strong> projeto de estudo de caso, não é um sistema de decisão autônoma nem um serviço de produção.
+      O modelo prioriza a fila; a decisão de periciar continua humana.
+    </div>
+
+    <h2>Visão geral</h2>
+    <p>
+      O projeto aborda a alocação de <strong>900 perícias por mês</strong> entre sinistros de automóvel.
+      Em vez de classificar casos por um limiar genérico, o Pipeline calcula um escore de priorização
+      e organiza a fila para que a equipe avalie primeiro os casos de maior prioridade estimada.
+      O artefato final é um Pipeline serializado (preparação, imputação e XGBoost), com
+      <strong>18 features</strong> conhecidas no momento da abertura do sinistro.
+    </p>
+
+    <h2>Resultados-chave (mês de teste)</h2>
+    <div class="results">
+      <div class="result-card">
+        <div class="result-value">R$ 3.731.700</div>
+        <div class="result-label">Política de escore (mês)</div>
+      </div>
+      <div class="result-card">
+        <div class="result-value">−R$ 326.200</div>
+        <div class="result-label">Regra atual (> R$ 50 mil)</div>
+      </div>
+      <div class="result-card">
+        <div class="result-value">R$ 4.057.900</div>
+        <div class="result-label">Ganho por mês</div>
+      </div>
+      <div class="result-card">
+        <div class="result-value">22,56%</div>
+        <div class="result-label">Precisão@900 (201 fraudes)</div>
+      </div>
+    </div>
+    <p>IC 95% do ganho: R$ 3.537.100 a R$ 4.665.500 · 11.904 sinistros no mês de teste.</p>
+
+    <h2>Como usar o app</h2>
+    <ol style="padding-left: 1.5rem; color: var(--muted);">
+      <li>Abra o app pelo botão acima.</li>
+      <li><strong>Fila do mês:</strong> visualize a fila ordenada por escore e ajuste o slider <em>k</em>.</li>
+      <li><strong>Sinistro individual:</strong> veja a explicação SHAP de um caso.</li>
+      <li><strong>Valor e governança:</strong> confira o ganho, IC e gatilhos de monitoramento.</li>
+    </ol>
+
+    <div class="links">
+      <a href="https://quilha-triagem.streamlit.app/" target="_blank" rel="noopener">🚀 App interativo</a>
+      <a href="https://github.com/flaviohenriquehb777/Auto-Insurance-Fraud" target="_blank" rel="noopener">📦 Repositório GitHub</a>
+      <a href="README.html">📖 README completo</a>
+    </div>
+
+    <footer>
+      <p>© 2026 Flávio Henrique Barbosa · Licença MIT · Feito com Streamlit e XGBoost</p>
+    </footer>
+  </div>
+</body>
+</html>
