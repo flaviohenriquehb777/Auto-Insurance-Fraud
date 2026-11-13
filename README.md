@@ -14,11 +14,11 @@
 
 <p align="center">
   <a href="https://quilha-triagem.streamlit.app/">
-    <img src="reports/figures/05_01_curva_resultado_k.png" alt="Curva Resultado(k) do campeão no mês de teste — clique para abrir a demonstração interativa." width="900">
+    <img src="assets/previews/painel-quilha-neon.png" alt="Painel Quilha Seguros — clique para abrir a demonstração interativa." width="900">
   </a>
 </p>
 
-<p align="center"><a href="https://quilha-triagem.streamlit.app/"><strong>▶ Abrir demonstração interativa</strong></a> — a curva acima mostra o resultado líquido em função do número de perícias (k); o pico marca a capacidade mensal de 900 perícias.</p>
+<p align="center"><a href="https://quilha-triagem.streamlit.app/"><strong>▶ Abrir demonstração interativa</strong></a></p>
 
 > **Escopo:** projeto de estudo de caso, não é um sistema de decisão autônoma nem um serviço de produção. O modelo prioriza a fila; a decisão de periciar continua humana.
 
