@@ -384,7 +384,7 @@ visual final).
 | Item | Valor |
 |---|---|
 | Repositório | `flaviohenriquehb777/Auto-Insurance-Fraud` |
-| Branch | `feature/fase-6-implantacao` |
+| Branch | `main` (após merge dos PRs #2 e #3) |
 | Entrypoint | `app.py` |
 | Python | 3.12 |
 | Secrets | vazio (o app não usa credenciais) |
