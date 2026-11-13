@@ -361,11 +361,10 @@ valor e governança, com os separadores monetários corrigidos para pt-BR.
 
 ### Limite do encerramento
 
-A documentação e as verificações locais estão concluídas, mas **seu aceite visual do app ainda
-está pendente**. Também não há URL pública: GitHub Pages não executa Streamlit; a publicação de
-uma página estática e a hospedagem separada do app ficam para depois do seu teste. Por isso, não
-ativei Pages nem publiquei o app, não fiz merge na `main` e não tratei esta execução como aceite
-de produção.
+A documentação e as verificações locais estão concluídas, e **o app foi publicado e
+validado** no Streamlit Community Cloud. O aceite visual (UAT) foi realizado em
+13/11/2026 — veja registro abaixo. Os merges na `main` e a configuração do GitHub
+Pages foram as etapas finais pendentes; veja o andamento na seção de Progresso.
 
 Consulta aos PRs em aberto (13/11/2026): [PR #2](https://github.com/flaviohenriquehb777/Auto-Insurance-Fraud/pull/2)
 está aberto e mergeável de `feature/fase-5-avaliacao` para `main`; [PR #3](https://github.com/flaviohenriquehb777/Auto-Insurance-Fraud/pull/3)
@@ -405,6 +404,23 @@ dependências via `uv sync`. O `app.py` na raiz injeta `src/` no `sys.path`, ent
 
 O favicon (`assets/brand/favicon.png`) e os assets estão versionados e servidos corretamente.
 
+### Aceite visual (UAT) · CONCLUÍDO (13/11/2026)
+
+O usuário realizou o UAT no ambiente publicado, exercitando os cinco cenários abaixo.
+Todos passaram conforme esperado.
+
+| # | Cenário | Arquivo | Resultado |
+|---|---|---|---|
+| 1 | Fila do mês com o mês de teste | (demonstração automática, holdout ago/2026) | ✅ 11.904 sinistros, `k=891`, 201 fraudes nas 891 primeiras posições (22,56%) |
+| 2 | Valor e governança | — | ✅ Política R$ 3.731.700, regra atual −R$ 326.200, ganho R$ 4.057.900, IC 95% [R$ 3.537.100; R$ 4.665.500] |
+| 3 | Sinistro individual — explicação SHAP | — | ✅ Gráfico de contribuições renderizado; valor esperado em pt-BR |
+| 4 | Upload com erros (fail closed) | `lote_teste_uat.csv` (44 linhas, 4 inválidas) | ✅ Lote recusado; 4 erros exibidos com linha, campo, valor e motivo |
+| 5 | Upload válido (caminho feliz) | `lote_teste_uat_valido.csv` (40 linhas) | ✅ Pontuação e ordenação; `k=3` (proporcional); fila exportável em CSV |
+
+Os arquivos de teste sintéticos (`data/raw/lote_teste_uat.csv` e
+`data/raw/lote_teste_uat_valido.csv`) foram gerados localmente com `random.seed(42)` e
+**não** são versionados (ficam em `data/raw/`, cujo conteúdo é ignorado pelo Git).
+
 ***
 
 ## Progresso
@@ -416,4 +432,4 @@ O favicon (`assets/brand/favicon.png`) e os assets estão versionados e servidos
 | 2 | O app de triagem (Streamlit) | **concluída** — 3 telas, 20 testes, 126 na suíte |
 | 3 | O notebook consolidado único | **concluída** — 30 células, 0 erros, 24/24 campos, 79,20 s |
 | 4 | O resumo executivo `.docx` | **concluída** — 5 partes + Quadro, `0` ausentes nos dois lados, 6 testes |
-| 5 | Verificação final e encerramento | **concluída documentalmente** — Ruff verde, 133 testes, entregáveis conferidos; app publicado em https://quilha-triagem.streamlit.app/ (smoke test das 3 telas OK); UAT pendente |
+| 5 | Verificação final e encerramento | **concluída documentalmente** — Ruff verde, 133 testes, entregáveis conferidos; app publicado em https://quilha-triagem.streamlit.app/; UAT concluído (5 cenários OK) |
