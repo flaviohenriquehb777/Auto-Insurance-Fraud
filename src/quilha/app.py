@@ -148,6 +148,13 @@ N_SINISTROS_MES_TESTE = 11_904
 # Piso de viabilidade: a partir daqui a perícia se paga em valor esperado.
 PISO_VIABILIDADE = CUSTO_PERICIA / CUSTO_FRAUDE_PAGA  # 3,2258%
 
+
+def formatar_reais(valor: float, casas: int = 0) -> str:
+    """Formata um número no padrão monetário brasileiro, sem o prefixo R$."""
+    formatado = f"{valor:,.{casas}f}"
+    return formatado.replace(",", "#").replace(".", ",").replace("#", ".")
+
+
 # Gatilhos do plano de monitoramento (docs/05_avaliacao.md, §9.5) expostos na tela 3.
 GATILHOS_MONITORAMENTO: tuple[tuple[str, str, str], ...] = (
     ("Precisão@900", "< 3,2258% por 2 meses seguidos", "Recalibrar; se persistir, re-treinar"),
@@ -525,7 +532,11 @@ def main() -> None:  # pragma: no cover - a tela é exercitada à mão e no smok
     """Renderiza as três telas do app de triagem."""
     import streamlit as st
 
-    st.set_page_config(page_title="Quilha · Triagem de perícia", page_icon="🛡️", layout="wide")
+    st.set_page_config(
+        page_title="Quilha · Triagem de perícia",
+        page_icon=str(RAIZ_PROJETO / "assets" / "brand" / "favicon.png"),
+        layout="wide",
+    )
     st.title("Triagem de perícia — Quilha Seguros")
     st.info(MENSAGEM_PERMANENTE)
 
@@ -576,7 +587,7 @@ def _tela_fila(st, lote: pd.DataFrame) -> None:  # pragma: no cover - depende da
             "omitiria sinistros sem avisar."
         )
         erros = recusa.como_tabela()
-        st.dataframe(erros, use_container_width=True)
+        st.dataframe(erros, width="stretch")
         st.download_button(
             "Exportar erros (CSV)",
             erros.to_csv(index=False).encode("utf-8"),
@@ -595,7 +606,7 @@ def _tela_fila(st, lote: pd.DataFrame) -> None:  # pragma: no cover - depende da
         f"{len(lote)} sinistros no lote · {k} periciados · corte no escore "
         f"{fila['escore'].min():.6f}"
     )
-    st.dataframe(fila, use_container_width=True)
+    st.dataframe(fila, width="stretch")
     st.download_button(
         "Exportar fila (CSV)",
         fila.to_csv(index=False).encode("utf-8"),
@@ -626,7 +637,7 @@ def _tela_individual(st, lote: pd.DataFrame, lote_individual: pd.DataFrame) -> N
     erros = validar_payload(linha_crua)
     if erros:
         st.error("O contrato recusou o chamado — corrija e reenvie:")
-        st.dataframe(PayloadRecusado(erros).como_tabela(), use_container_width=True)
+        st.dataframe(PayloadRecusado(erros).como_tabela(), width="stretch")
         return
 
     escores = escore_da_politica(pipeline, lote)
@@ -640,11 +651,12 @@ def _tela_individual(st, lote: pd.DataFrame, lote_individual: pd.DataFrame) -> N
 
     valores = valor_esperado(escore)
     st.write(
-        f"**Valor esperado da perícia:** R$ {valores['valor_bruto']:,.2f} — estimativa com a "
+        f"**Valor esperado da perícia:** R$ {formatar_reais(valores['valor_bruto'], 2)} "
+        "— estimativa com a "
         f"probabilidade bruta do campeão. Na faixa de escore equivalente "
         f"({valores['faixa_escore']:.4f}), a **taxa observada** foi de "
         f"{valores['taxa_observada'] * 100:.2f}%, o que dá "
-        f"R$ {valores['valor_com_taxa_observada']:,.2f}. Piso de viabilidade: "
+        f"R$ {formatar_reais(valores['valor_com_taxa_observada'], 2)}. Piso de viabilidade: "
         f"{valores['piso_viabilidade'] * 100:.4f}%."
     )
 
@@ -660,12 +672,13 @@ def _tela_valor(st) -> None:  # pragma: no cover - depende da UI
     painel = painel_valor()
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("Política de escore (mês)", f"R$ {painel['politica']:,.0f}")
-    col2.metric("Regra atual > R$ 50 mil (mês)", f"R$ {painel['regra_atual']:,.0f}")
-    col3.metric("Ganho por mês", f"R$ {painel['ganho']:,.0f}")
+    col1.metric("Política de escore (mês)", f"R$ {formatar_reais(painel['politica'])}")
+    col2.metric("Regra atual > R$ 50 mil (mês)", f"R$ {formatar_reais(painel['regra_atual'])}")
+    col3.metric("Ganho por mês", f"R$ {formatar_reais(painel['ganho'])}")
     st.caption(
         f"IC 95% do ganho (bootstrap, 2.000 reamostragens): "
-        f"R$ {painel['ganho_ic_inferior']:,.0f} a R$ {painel['ganho_ic_superior']:,.0f}. "
+        f"R$ {formatar_reais(painel['ganho_ic_inferior'])} a "
+        f"R$ {formatar_reais(painel['ganho_ic_superior'])}. "
         f"{painel['tp']} fraudes em {painel['pericias']} perícias "
         f"({painel['precisao'] * 100:.2f}% de acerto) no mês de teste de "
         f"{painel['n_sinistros']} sinistros."
@@ -679,8 +692,9 @@ def _tela_valor(st) -> None:  # pragma: no cover - depende da UI
 
     st.write("### Valor por sinistro")
     st.write(
-        f"`valor esperado = chance × R$ {painel['custo_fraude_paga']:,.0f} − "
-        f"R$ {painel['custo_pericia']:,.0f}`, exibido como faixa com a taxa observada ao lado: "
+        f"`valor esperado = chance × R$ {formatar_reais(painel['custo_fraude_paga'])} − "
+        f"R$ {formatar_reais(painel['custo_pericia'])}`, exibido como faixa com a taxa "
+        "observada ao lado: "
         "a calibração do campeão não é confiável (Brier 0,014702 sem calibração contra "
         "0,014688 com isotonic) e por isso a probabilidade bruta não é apresentada como previsão."
     )
@@ -692,7 +706,7 @@ def _tela_valor(st) -> None:  # pragma: no cover - depende da UI
     st.write(f"Artefato: `{saude['caminho']}`")
     st.code(saude["hash"], language=None)
     st.write(f"Linhas avaliadas: {saude['n_linhas']}")
-    st.dataframe(saude["imputacoes"], use_container_width=True)
+    st.dataframe(saude["imputacoes"], width="stretch")
     for alerta in saude["alertas_imputacao"]:
         st.warning(alerta)
 
@@ -702,15 +716,17 @@ def _tela_valor(st) -> None:  # pragma: no cover - depende da UI
         st.success(
             f"Conferência do painel: o artefato reproduz o mês auditado — "
             f"{conferencia['tp']} fraudes em {conferencia['periciados']} perícias, "
-            f"R$ {conferencia['resultado']:,.2f}."
+            f"R$ {formatar_reais(conferencia['resultado'], 2)}."
         )
     else:
         st.error(f"O artefato NÃO reproduz o mês auditado: {conferencia}")
 
     st.write("### Deriva das features principais (PSI)")
     treino, _ = carregar_treino_e_teste()
-    st.dataframe(drift_das_features(treino, _carregar_lote(st, chave="lote_drift")),
-                 use_container_width=True)
+    st.dataframe(
+        drift_das_features(treino, _carregar_lote(st, chave="lote_drift")),
+        width="stretch",
+    )
 
     st.write("### Gatilhos de monitoramento e circuit breaker")
     st.table(

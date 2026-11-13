@@ -32,6 +32,7 @@ from quilha.app import (
     carregar_treino_e_teste,
     drift_das_features,
     faixa_prioridade,
+    formatar_reais,
     hash_do_artefato,
     k_do_lote,
     medir_valor_da_politica,
@@ -205,6 +206,11 @@ def test_rotulos_e_mensagem_permanente_nao_acusam_ninguem() -> None:
 # ---------------------------------------------------------------------------
 # 4. O valor: painel, valor por sinistro e drift
 # ---------------------------------------------------------------------------
+def test_formatacao_monetaria_usa_separadores_pt_br() -> None:
+    assert formatar_reais(3_731_700) == "3.731.700"
+    assert formatar_reais(-326_200, casas=2) == "-326.200,00"
+
+
 def test_painel_de_valor_bate_com_a_fase_5() -> None:
     painel = painel_valor()
 

@@ -228,7 +228,7 @@ uv run jupytext --to notebook --execute notebooks/clean/06_consolidado.py -o 06_
 | Células | **30** (22 código + 8 markdown) |
 | Células com erro | **0** |
 | Campos do Quadro impressos | **24 de 24** |
-| Tempo real de execução | **48,53 s** |
+| Tempo real de execução | **79,20 s** |
 | Contrato na fronteira (payload inválido) | `1 erro` listado → `pontuar_lote RECUSOU o lote inteiro (fail closed)` |
 | Conferência do valor da política | `TP=201`, `periciados=900`, precisão 22,33%, **R$ 3.731.700,00**, `confere=True` |
 | Hash do `.joblib` | `65c7eb5e…bb10a3` |
@@ -253,7 +253,7 @@ Registradas dentro do próprio notebook, porque **procedência distinta não é 
 |---|---|
 | Roda de ponta a ponta **sem credencial** | **atendido** — o MLOps degrada para `sqlite:///mlflow.db`; o `try/except` prova a degradação |
 | Imprime os **24 números** do Quadro | **atendido** — 24/24 campos impressos |
-| Mede e registra o **tempo real** | **atendido** — **48,53 s** |
+| Mede e registra o **tempo real** | **atendido** — **79,20 s** |
 | Contrato recusa dado inválido (saída real) | **atendido** — `RECUSOU o lote inteiro (fail closed)` |
 
 ***
@@ -321,6 +321,61 @@ passam a dizer exatamente o mesmo.
 
 ***
 
+## Parte 5 — Verificação final e encerramento documental · CONCLUÍDA
+
+A verificação fecha os artefatos, o código e a documentação da Fase 6. A execução mais recente
+do notebook ocorreu **sem credenciais de MLflow**; o aviso abaixo confirma a degradação local, sem
+interromper o fluxo:
+
+```text
+Credenciais do MLflow ausentes (MLFLOW_TRACKING_URI/USERNAME/PASSWORD):
+gravando as runs localmente em `mlflow.db`, na raiz do projeto. O treino segue normalmente.
+```
+
+### Evidências finais
+
+| Verificação | Resultado observado |
+|---|---|
+| `uv run ruff check src tests` | `All checks passed!` |
+| `uv run pytest -q` | **133 passed in 19.87s** |
+| Notebook consolidado executado | **30 células** (22 código), **0 erros**, **24/24** respostas conferidas; **79,20 s** |
+| Fallback do MLOps | Credenciais ausentes; SQLite local; execução terminou normalmente |
+| Conferência CSV → `.ipynb` → `.docx` | **24** respostas, 5 partes, tabela com 25 linhas, **0 ausentes** em ambos |
+| Smoke test visual local | App abriu na fila de demonstração e na tela de valor; interface exibiu moeda em pt-BR |
+| Favicon | Servido pelo Streamlit a partir de `assets/brand/favicon.png` |
+| README | Estrutura, métricas, instruções, limitações e hospedagem documentadas |
+
+O notebook apresentou a resposta final medida: política de 900 perícias com **R$ 3.731.700,00**
+contra **−R$ 326.200,00** da regra atual, ganho de **R$ 4.057.900,00** e IC 95% bootstrap de
+**R$ 3.537.100,00 a R$ 4.665.500,00**. A imagem no README é uma captura real da tela local de
+valor e governança, com os separadores monetários corrigidos para pt-BR.
+
+### Frase de encerramento do projeto
+
+> Foi entregue um Pipeline XGBoost auditado, um contrato que recusa lotes inválidos, uma interface
+> que prioriza sem acusar, monitoramento e dois entregáveis reproduzíveis. No holdout de agosto de
+> 2026, o corte de 900 perícias gerou **R$ 3.731.700,00** líquidos, **R$ 4.057.900,00** acima da
+> regra vigente. A recomendação precisa ser reavaliada se o resultado realizado ficar abaixo de
+> zero ou se a Precisão@900 cair abaixo do piso de equilíbrio de **3,2258% por dois meses seguidos**;
+> os valores são evidência do estudo de caso, não garantia de desempenho futuro.
+
+### Limite do encerramento
+
+A documentação e as verificações locais estão concluídas, mas **seu aceite visual do app ainda
+está pendente**. Também não há URL pública: GitHub Pages não executa Streamlit; a publicação de
+uma página estática e a hospedagem separada do app ficam para depois do seu teste. Por isso, não
+ativei Pages nem publiquei o app, não fiz merge na `main` e não tratei esta execução como aceite
+de produção.
+
+Consulta aos PRs em aberto (13/11/2026): [PR #2](https://github.com/flaviohenriquehb777/Auto-Insurance-Fraud/pull/2)
+está aberto e mergeável de `feature/fase-5-avaliacao` para `main`; [PR #3](https://github.com/flaviohenriquehb777/Auto-Insurance-Fraud/pull/3)
+está aberto e mergeável de `feature/fase-6-implantacao` para `feature/fase-5-avaliacao`. Como o
+segundo está empilhado sobre o primeiro, a sequência profissional é integrar a Fase 5 primeiro e,
+depois, atualizar o destino do PR da Fase 6 para `main`, validar CI e só então considerar o merge.
+Nenhuma dessas alterações remotas foi feita nesta etapa.
+
+***
+
 ## Progresso
 
 | Parte | Descrição | Status |
@@ -328,6 +383,6 @@ passam a dizer exatamente o mesmo.
 | 0 | Reconciliação e decisão pendente | **concluída** — Ramo A |
 | 1 | Blindagem da fronteira (camadas 2 e 3 da vírgula) | **concluída** — contrato + monitor, 49 testes |
 | 2 | O app de triagem (Streamlit) | **concluída** — 3 telas, 20 testes, 126 na suíte |
-| 3 | O notebook consolidado único | **concluída** — 30 células, 0 erros, 24/24 campos, 48,53 s |
+| 3 | O notebook consolidado único | **concluída** — 30 células, 0 erros, 24/24 campos, 79,20 s |
 | 4 | O resumo executivo `.docx` | **concluída** — 5 partes + Quadro, `0` ausentes nos dois lados, 6 testes |
-| 5 | Verificação final e encerramento | pendente |
+| 5 | Verificação final e encerramento | **concluída documentalmente** — Ruff verde, 133 testes, entregáveis conferidos; UAT e publicação pendentes |

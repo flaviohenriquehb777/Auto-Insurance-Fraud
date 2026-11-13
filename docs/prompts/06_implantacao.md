@@ -349,7 +349,7 @@ resposta.
 | 7. Quadro | os 24 campos, impressos e preenchidos |
 
 **Notebook-fonte:** `notebooks/clean/06_consolidado.py` (via `jupytext`, sem outputs) e
-**executado** `notebooks/executed/06_consolidado.ipynb`.
+**executado** `06_consolidado.ipynb` na raiz (gerado localmente e ignorado pelo Git).
 
 **Critério de saída:** o `.ipynb` roda de ponta a ponta **sem credencial**, imprime os 24 números
 do Quadro e o **tempo real de execução** é **medido e registrado** (não estimado).
@@ -425,7 +425,7 @@ saídas do `.ipynb`, e `python-docx` no `pyproject.toml`.
 - `src/quilha/contrato.py`, `src/quilha/monitoramento.py` e `src/quilha/relatorio.py`
 - App Streamlit (arquivo do app + `tests/test_app.py`) e `streamlit` no `pyproject.toml`
 - `tests/test_contrato.py`
-- `notebooks/clean/06_consolidado.py` e `notebooks/executed/06_consolidado.ipynb`
+- `notebooks/clean/06_consolidado.py` e `06_consolidado.ipynb` (raiz, gerado localmente e ignorado pelo Git)
 - `Relatorio_Quilha_Fraude.docx` (na raiz) e `python-docx` no `pyproject.toml`
 - README atualizado e tabela **Progresso da execução** deste prompt completa
 
@@ -462,9 +462,9 @@ próximo passo."**
 | 0 | Reconciliação e decisão pendente (ramo do gerente) | **concluída** — Ramo A (sem re-treino) |
 | 1 | Blindagem da fronteira (camadas 2 e 3 da vírgula) | **concluída** — contrato + monitor, 49 testes |
 | 2 | O app de triagem (Streamlit) | **concluída** — 3 telas, 20 testes, 126 na suíte |
-| 3 | O notebook consolidado único | **concluída** — `06_consolidado.ipynb`, 30 células, 0 erros, 24/24 campos do Quadro, 48,53 s |
+| 3 | O notebook consolidado único | **concluída** — `06_consolidado.ipynb`, 30 células, 0 erros, 24/24 campos do Quadro, 79,20 s |
 | 4 | O resumo executivo `.docx` | **concluída** — `Relatorio_Quilha_Fraude.docx`, 5 partes + Quadro (24 campos), `0` ausentes no `.ipynb`/`.docx`, `python-docx` no `dev` |
-| 5 | Verificação final e encerramento | pendente |
+| 5 | Verificação final e encerramento | **concluída documentalmente** — Ruff verde, 133 testes, notebook e `.docx` conferidos; aceite visual e publicação pendentes |
 
 ---
 
