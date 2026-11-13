@@ -1,0 +1,1647 @@
+# %% [markdown]
+# # Fase 5 — Avaliação (CRISP-DM)
+#
+# **Projeto:** Detecção de fraude em sinistros de automóvel — Quilha Seguros
+# **Semente:** `42` · **Mês de avaliação:** agosto/2026 · **Capacidade:** 900 perícias/mês
+#
+# Esta fase não treina modelo: carrega o campeão aprovado na Fase 4 e o converte em
+# **política de perícia**. A decisão é `ordenar pelo escore → cortar em k → periciar`,
+# e o critério é o resultado líquido `21.700 × TP − 700 × k`.
+#
+# Partes: 0 (reconciliação com o case) · 1 (auditoria do artefato) · 2 (backtest) ·
+# 3 (política e economia — Pergunta 4) · 4 (dimensionamento — Pergunta 5) ·
+# 5 (sensibilidade e incerteza) · 6 (aceitabilidade e risco) · 7 (processo e próximos
+# passos) · 8 (consolidação).
+#
+# MLflow usa DagsHub quando há credenciais e SQLite local quando não há; nenhuma
+# célula exige token para concluir.
+
+# %%
+# =============================================================================
+# Raiz do projeto e imports
+# =============================================================================
+from pathlib import Path
+import hashlib
+import json
+import sys
+
+import numpy as np
+import pandas as pd
+from sklearn.base import clone
+from xgboost import XGBClassifier
+
+SEED = 42
+
+
+def localizar_raiz(inicio: Path) -> Path:
+    """Sobe diretórios até localizar o pyproject.toml da raiz."""
+    for pasta in [inicio.resolve(), *inicio.resolve().parents]:
+        if (pasta / "pyproject.toml").exists():
+            return pasta
+    raise FileNotFoundError("Raiz do projeto não encontrada (pyproject.toml ausente).")
+
+
+RAIZ = localizar_raiz(Path.cwd())
+if str(RAIZ / "src") not in sys.path:
+    sys.path.insert(0, str(RAIZ / "src"))
+
+from quilha.avaliacao import (
+    CAMPOS_QUADRO_RESPOSTAS,
+    LIMIAR_CORTE_TEORICO,
+    N_REAMOSTRAGENS_BOOTSTRAP,
+    PERGUNTA_DE_DECISAO,
+    PERICIAS_POR_PERITO,
+    PERITOS_ATUAIS,
+    aplicar_politica,
+    bootstrap_resultado,
+    break_even,
+    construir_politica_campeao,
+    construir_referencias,
+    curva_ganho_por_perito,
+    custo_sem_pericia,
+    escore_positivo,
+    executar_backtest,
+    grade_sensibilidade,
+    janelas_walk_forward,
+    k_marginal_cruza_piso,
+    medir_janela,
+    medir_politicas_no_mes,
+    montar_quadro_respostas,
+    piso_viabilidade,
+    pontos_de_decisao_k,
+    regra_atual_do_case,
+    resultado_economico,
+    resultado_liquido,
+    resumo_parametros_decisao,
+    salvar_bootstrap,
+    salvar_curva_decisao,
+    salvar_ganho_por_perito,
+    salvar_sensibilidade,
+    sensibilidade_taxa_fraude,
+    taxa_fraude_de_break_even,
+    tp_acumulado_por_k,
+    triagem_disparidade,
+)
+from quilha.dados import carregar_base_crua
+from quilha.explicacao import explicar_sinistro
+from quilha.mlops import contexto_run, credenciais_presentes, nome_run
+from quilha.modelagem import (
+    CAPACIDADE_MENSAL,
+    CUSTO_FRAUDE_PAGA,
+    CUSTO_PERICIA,
+    LIMIAR_REGRA_ATUAL,
+    PASTA_TABELAS,
+    SINISTROS_POR_MES,
+    calcular_k_proporcional,
+    calcular_metricas_holdout,
+    carregar_treino_teste,
+    curva_resultado_k,
+    importancia_shap,
+    separar_entrada_alvo,
+)
+from quilha.pipeline import CAMINHO_PIPELINE, carregar_pipeline, construir_pipeline
+from quilha.preparacao import (
+    BOLETIM_NAO_INFORMADO,
+    FEATURES,
+    ROTULOS_APOLICE,
+    ROTULOS_VALOR,
+    preparar,
+)
+
+pd.set_option("display.float_format", lambda valor: f"{valor:,.6f}")
+
+# %% [markdown]
+# ## Parte 0 — Reconciliação com o case e travamento do critério de decisão
+#
+# Antes de qualquer análise: fixar os parâmetros do Anexo 1, derivar o piso de
+# viabilidade e declarar por escrito qual é a decisão desta fase e o que a encerra.
+# Tudo sai de constantes nomeadas — nenhum número solto no código.
+
+# %%
+# =============================================================================
+# Parte 0 — Parâmetros do case, piso de viabilidade e pergunta de decisão
+# =============================================================================
+parametros = resumo_parametros_decisao()
+
+# O piso é derivado na célula, não copiado: 700 / 21.700.
+piso = piso_viabilidade()
+
+print("=" * 78)
+print("PARÂMETROS DA DECISÃO (Anexo 1 do case)")
+print("=" * 78)
+for nome, valor in parametros.items():
+    if nome == "pergunta_de_decisao":
+        continue
+    if isinstance(valor, float):
+        print(f"  {nome:<34} {valor:,.4f}")
+    else:
+        print(f"  {nome:<34} {valor}")
+
+print()
+print("PISO DE VIABILIDADE (derivado nesta célula)")
+print(f"  custo da perícia        = R$ {parametros['custo_pericia']:,.2f}")
+print(f"  custo da fraude paga    = R$ {parametros['custo_fraude_paga']:,.2f}")
+print(f"  p* = 700 / 21.700       = {piso:.6f}  ({piso * 100:.4f}%)")
+print(f"  razão de custo          = {parametros['razao_custo_fraude_pericia']:.2f} : 1")
+print()
+print("MATEMÁTICA DA POLÍTICA")
+print("  Resultado(k) = 21.700 × TP(k) − 700 × k,   sujeito a k ≤ 900/mês")
+print("  A k-ésima perícia só se paga enquanto a precisão marginal ≥ 3,2258%")
+print()
+print("REFERÊNCIA: custo de não periciar ninguém")
+print(f"  21.700 × 281 fraudes de agosto            = R$ {custo_sem_pericia(281):,.2f}")
+print()
+print("CONFERÊNCIA: conta manual de um caso sintético")
+print(f"  resultado_liquido(tp=1, k=31) = R$ {resultado_liquido(tp=1, k=31):,.2f}  (deve dar 0)")
+print()
+print("-" * 78)
+print("PERGUNTA QUE ENCERRA A FASE")
+print("-" * 78)
+print(PERGUNTA_DE_DECISAO)
+print()
+print(f"Bootstrap da Parte 5: {N_REAMOSTRAGENS_BOOTSTRAP:,} reamostragens (SEED={SEED})")
+print(f"Tabelas da fase: {PASTA_TABELAS.relative_to(RAIZ)}")
+
+# %% [markdown]
+# **Leitura da Parte 0.** O piso de viabilidade (`3,2258%`) está **acima** da taxa de
+# fraude da base (`2,47%`) — periciar ao acaso dá prejuízo. A política só cria valor
+# por **concentração**: ela precisa empurrar fraudes para o topo da fila com precisão
+# acima do piso. É esse o objeto medido daqui em diante. A conferência
+# `resultado_liquido(tp=1, k=31) = 0` fecha o ciclo: 31 perícias custam exatamente uma
+# fraude paga, que é a mesma conta vista de dois lados.
+
+# %% [markdown]
+# ## Parte 1 — Auditoria do que está sendo avaliado
+#
+# Provar que a política avaliada é **exatamente** o artefato aprovado na Fase 4 — nem
+# outro modelo, nem outra lista de features. Primeiro o tipo do estimador e os
+# hiperparâmetros, depois o hash SHA-256 que liga a avaliação ao artefato auditável e,
+# por fim, o **teste de fumaça**: o artefato tem de reproduzir o `Resultado@900`
+# da Fase 4. Não reproduzir invalida tudo o que vem depois.
+
+# %%
+# =============================================================================
+# Parte 1 — Tipo do estimador final, hiperparâmetros e features
+# =============================================================================
+pipeline = carregar_pipeline(CAMINHO_PIPELINE)
+modelo_final = pipeline.named_steps["modelo"]
+
+print("ETAPAS DO PIPELINE:", list(pipeline.named_steps))
+print("TIPO DO ESTIMADOR FINAL:", type(modelo_final).__name__)
+print()
+
+# Tabela de hiperparâmetros de docs/04_modelagem.md, §3 ("Parâmetros do XGBoost campeão").
+ESPERADO_FASE4 = {
+    "max_depth": 4,
+    "n_estimators": 350,
+    "learning_rate": 0.03,
+    "subsample": 0.85,
+    "colsample_bytree": 0.7,
+    "gamma": 3,
+    "min_child_weight": 5,
+    "reg_lambda": 1,
+    "scale_pos_weight": 1,
+}
+parametros_artefato = modelo_final.get_params()
+print("HIPERPARÂMETROS — artefato x Fase 4")
+hiperparametros_ok = True
+for nome, esperado in ESPERADO_FASE4.items():
+    atual = parametros_artefato.get(nome)
+    confere = abs(float(atual) - float(esperado)) < 1e-12
+    hiperparametros_ok = hiperparametros_ok and confere
+    print(f"  {nome:<18} artefato={atual!r:<10} Fase4={esperado!r:<10} {'OK' if confere else 'DIVERGE'}")
+print(f"  -> todos conferem: {hiperparametros_ok}")
+print()
+
+features_artefato = list(FEATURES)
+print(f"FEATURES ({len(features_artefato)}) — ordem canônica de preparacao.FEATURES")
+for posicao, nome in enumerate(features_artefato, start=1):
+    print(f"  {posicao:>2}. {nome}")
+
+# %%
+# =============================================================================
+# Parte 1 — Hash SHA-256 do artefato e metadados de versão
+# =============================================================================
+CAMINHO_VERSOES = CAMINHO_PIPELINE.with_name("pipeline_fraude.versoes.json")
+hash_pipeline = hashlib.sha256(CAMINHO_PIPELINE.read_bytes()).hexdigest()
+versoes = json.loads(CAMINHO_VERSOES.read_text(encoding="utf-8"))
+
+print("IDENTIDADE DO ARTEFATO SOB AVALIAÇÃO")
+print(f"  arquivo  : {CAMINHO_PIPELINE.relative_to(RAIZ)}")
+print(f"  tamanho  : {CAMINHO_PIPELINE.stat().st_size:,} bytes")
+print(f"  SHA-256  : {hash_pipeline}")
+print(f"  gerado_em: {versoes['gerado_em']}")
+print(
+    "  versões  : "
+    f"python {versoes['python']} | sklearn {versoes['scikit_learn']} | "
+    f"pandas {versoes['pandas']} | numpy {versoes['numpy']}"
+)
+print(f"  features no versoes.json: {len(versoes['features'])}")
+print(f"  mesma ordem de preparacao.FEATURES: {versoes['features'] == features_artefato}")
+
+# %%
+# =============================================================================
+# Parte 1 — Teste de fumaça: o artefato reproduz o Resultado@900 da Fase 4?
+# =============================================================================
+X_treino, y_treino, X_teste, y_teste = carregar_treino_teste()
+probabilidades = pipeline.predict_proba(X_teste)[:, 1]
+metricas_fumaca = calcular_metricas_holdout(y_teste, probabilidades)
+
+REFERENCIA_FASE4 = {"resultado_900": 3_731_700.0, "tp_900": 201, "fp_900": 699, "fn_900": 80}
+
+print("TESTE DE FUMAÇA (holdout de agosto, corte de 900)")
+print(f"  sinistros no teste: {len(y_teste):,}")
+print(f"  fraudes no teste  : {int(y_teste.sum())}")
+print(f"  TP@900: {metricas_fumaca['tp_900']:>4}  (Fase 4: {REFERENCIA_FASE4['tp_900']})")
+print(f"  FP@900: {metricas_fumaca['fp_900']:>4}  (Fase 4: {REFERENCIA_FASE4['fp_900']})")
+print(f"  FN@900: {metricas_fumaca['fn_900']:>4}  (Fase 4: {REFERENCIA_FASE4['fn_900']})")
+print(
+    f"  Resultado@900: R$ {metricas_fumaca['resultado_900']:,.2f}  "
+    f"(Fase 4: R$ {REFERENCIA_FASE4['resultado_900']:,.2f})"
+)
+print(f"  PR AUC: {metricas_fumaca['pr_auc']:.6f} | ROC AUC: {metricas_fumaca['roc_auc']:.6f}")
+
+reproduz = (
+    metricas_fumaca["tp_900"] == REFERENCIA_FASE4["tp_900"]
+    and metricas_fumaca["fp_900"] == REFERENCIA_FASE4["fp_900"]
+    and metricas_fumaca["fn_900"] == REFERENCIA_FASE4["fn_900"]
+    and abs(metricas_fumaca["resultado_900"] - REFERENCIA_FASE4["resultado_900"]) < 0.5
+)
+print()
+if reproduz:
+    print("VEREDITO: REPRODUZ EXATAMENTE — a avaliação é sobre o artefato aprovado na Fase 4.")
+else:
+    raise AssertionError("O artefato NÃO reproduz o Resultado@900 da Fase 4: PARAR a fase.")
+
+# %%
+# =============================================================================
+# Parte 1 — As três referências obrigatórias, medidas no holdout
+# =============================================================================
+# Os estimadores das referências (b) e (c) são ajustados só no TREINO; (a) não tem
+# estimador. Medir as três aqui é o mínimo para "fixá-las": a economia de cada uma
+# também é o piso contra o qual a política será comparada nas Partes 3 e 5.
+referencias = construir_referencias(k=CAPACIDADE_MENSAL)
+referencias["regra_atual"].estimador.fit(X_treino, y_treino)
+referencias["aleatoria"].estimador.fit(X_treino, y_treino)
+
+linhas_referencia = []
+for chave, politica in referencias.items():
+    economia = resultado_economico(y_teste, aplicar_politica(politica, X_teste))
+    linhas_referencia.append({"referencia": chave, "politica": politica.nome, **economia})
+
+tabela_referencias = pd.DataFrame(linhas_referencia)
+print("AS TRÊS REFERÊNCIAS NO HOLDOUT DE AGOSTO")
+print(
+    tabela_referencias[
+        ["referencia", "n_periciados", "tp", "fp", "fn", "precisao", "economia", "custo_total"]
+    ].to_string(index=False)
+)
+print()
+for _, linha in tabela_referencias.iterrows():
+    print(
+        f"  {linha['politica']:<26} economia = R$ {linha['economia']:>14,.2f} | "
+        f"custo total = R$ {linha['custo_total']:>13,.2f} | TP={linha['tp']}"
+    )
+
+# %% [markdown]
+# **Leitura da Parte 1.** O artefato é o `XGBClassifier` da Fase 4 (hiperparâmetros e as 18
+# features conferem) e **reproduz** `Resultado@900` com `TP=201`, `FP=699`, `FN=80` —
+# o hash SHA-256 acima é o que amarra esta fase a esse arquivo exato. As três referências
+# ficam fixadas como objetos: **não periciar ninguém** (economia 0; custo `21.700 × 281`),
+# a **regra atual** de R$ 50 mil e a **referência simples**.
+#
+# A **regra atual é uma política legítima e pode já ser lucrativa** — ela não é o "zero".
+# Por isso o critério da fase é **superá-la**, não apenas ficar positivo (alerta (b) da
+# Fase 1). É contra esse número que o campeão será comparado daqui em diante.
+
+# %% [markdown]
+# ## Parte 2 — Estimativa honesta fora da amostra
+#
+# O `R$ 3.731.700` de agosto é evidência de **seleção**: agosto foi usado para escolher o
+# campeão. Uma decisão de comitê não pode se apoiar só nisso. Aqui a avaliação vira
+# **origem móvel (walk-forward)**: treina em `abr..mn`, avalia no mês **seguinte**, avança o
+# treino — sem embaralhar o tempo. O campeão é **reajustado** em cada janela com os
+# hiperparâmetros **congelados** (`clone`) — não há reabertura de tuning; só os dados mudam.
+# Cada janela é uma amostra que o modelo não viu.
+
+# %%
+# =============================================================================
+# Parte 2 — Janelas cronológicas de origem móvel
+# =============================================================================
+base_completa = carregar_base_crua()
+datas_abertura = pd.to_datetime(base_completa["data_abertura"])
+X_completo, y_completo = separar_entrada_alvo(base_completa)
+modelo_campeao = pipeline.named_steps["modelo"]
+
+janelas = janelas_walk_forward(datas_abertura, minimo_meses_treino=1)
+
+linhas_janela = []
+for janela in janelas:
+    y_aval = y_completo.loc[janela["mascara_avaliacao"]]
+    linhas_janela.append(
+        {
+            "treino": janela["treino_rotulo"],
+            "avaliacao": janela["aval_rotulo"],
+            "n_sinistros": len(y_aval),
+            "n_fraudes": int(y_aval.sum()),
+            "taxa_fraude": float(y_aval.mean()),
+            "k_proporcional": calcular_k_proporcional(len(y_aval)),
+        }
+    )
+tabela_janelas = pd.DataFrame(linhas_janela)
+
+print(f"JANELAS DE ORIGEM MÓVEL ({len(tabela_janelas)} avaliações, treino expansivo)")
+print(tabela_janelas.to_string(index=False))
+
+# %%
+# =============================================================================
+# Parte 2 — Backtest: campeão x regra atual x referência simples
+# =============================================================================
+tabela_backtest = executar_backtest(X_completo, y_completo, datas_abertura, modelo_campeao)
+
+colunas_backtest = [
+    "janela", "treino", "politica", "n_sinistros", "n_fraudes", "taxa_fraude", "k",
+    "tp", "fp", "precisao_k", "resultado_k", "pr_auc", "roc_auc",
+]
+print("BACKTEST POR JANELA E POLÍTICA")
+print(tabela_backtest[colunas_backtest].to_string(index=False))
+
+# %%
+# =============================================================================
+# Parte 2 — Conferência interna: o reajuste reproduz o artefato auditado?
+# =============================================================================
+# Se o reajuste da última janela (abr–jul -> ago), feito com `clone`, não casar com o
+# artefato, o backtest não estaria medindo o mesmo modelo que está na prateleira.
+ultima = janelas[-1]
+X_treino_ultima = X_completo.loc[ultima["mascara_treino"]]
+y_treino_ultima = y_completo.loc[ultima["mascara_treino"]]
+X_aval_ultima = X_completo.loc[ultima["mascara_avaliacao"]]
+y_aval_ultima = y_completo.loc[ultima["mascara_avaliacao"]]
+
+campeao_reajustado = construir_pipeline(modelo=clone(modelo_campeao))
+campeao_reajustado.fit(X_treino_ultima, y_treino_ultima)
+
+escore_reajuste = escore_positivo(campeao_reajustado, X_aval_ultima)
+escore_artefato = escore_positivo(pipeline, X_aval_ultima)
+diferenca_maxima = float(np.max(np.abs(escore_reajuste - escore_artefato)))
+metricas_reajuste_900 = medir_janela(y_aval_ultima, escore_reajuste, k=900)
+
+print(f"última janela: treino {ultima['treino_rotulo']} -> avaliação {ultima['aval_rotulo']}")
+print(f"diferença máxima de probabilidade reajuste x artefato: {diferenca_maxima:.3e}")
+print(
+    f"Resultado@900 do reajuste: R$ {metricas_reajuste_900['resultado_k']:,.2f} "
+    f"(Fase 4: R$ 3.731.700,00) | TP={metricas_reajuste_900['tp']} "
+    f"FP={metricas_reajuste_900['fp']} FN={metricas_reajuste_900['fn']}"
+)
+
+# %%
+# =============================================================================
+# Parte 2 — Média ± desvio entre janelas e diferença pareada
+# =============================================================================
+pivot_resultado = tabela_backtest.pivot(index="janela", columns="politica", values="resultado_k")
+pivot_resultado = pivot_resultado[["campeao", "regra_atual", "aleatoria"]]
+pivot_resultado["campeao_menos_regra"] = (
+    pivot_resultado["campeao"] - pivot_resultado["regra_atual"]
+)
+
+print("RESULTADO@k POR JANELA (R$)")
+print(pivot_resultado.to_string())
+print()
+for coluna in ["campeao", "regra_atual", "aleatoria", "campeao_menos_regra"]:
+    serie = pivot_resultado[coluna]
+    print(f"  {coluna:<20} média R$ {serie.mean():>14,.2f}  ±  R$ {serie.std():>13,.2f}")
+
+diferenca = pivot_resultado["campeao_menos_regra"]
+print()
+print(
+    f"  diferença pareada: R$ {diferenca.mean():,.2f} ± R$ {diferenca.std():,.2f}  ->  "
+    + ("RUÍDO entre janelas" if diferenca.std() > diferenca.mean() else "acima do ruído")
+)
+
+# %%
+# =============================================================================
+# Parte 2 — Degradação temporal e frase de decisão
+# =============================================================================
+print("DEGRADAÇÃO TEMPORAL — campeão x regra atual, em ordem cronológica")
+for janela, linha in pivot_resultado.iterrows():
+    print(
+        f"  {janela}  campeão R$ {linha['campeao']:>13,.2f}  |  "
+        f"regra atual R$ {linha['regra_atual']:>13,.2f}"
+    )
+valor_inicial = pivot_resultado["campeao"].iloc[0]
+valor_final = pivot_resultado["campeao"].iloc[-1]
+print(
+    f"  primeira janela R$ {valor_inicial:,.2f}  ->  última janela R$ {valor_final:,.2f}  |  "
+    f"variação R$ {valor_final - valor_inicial:,.2f}"
+)
+
+CAMINHO_BACKTEST = PASTA_TABELAS / "avaliacao_backtest.csv"
+tabela_backtest.to_csv(CAMINHO_BACKTEST, index=False)
+print()
+print(f"Tabela salva em {CAMINHO_BACKTEST.relative_to(RAIZ)} ({len(tabela_backtest)} linhas).")
+
+n_janelas = len(pivot_resultado)
+print()
+if diferenca.mean() > 0:
+    print(
+        f"DECISÃO: fora da amostra, em {n_janelas} janelas, o campeão supera a regra atual em "
+        f"R$ {diferenca.mean():,.2f} ± R$ {diferenca.std():,.2f} por mês."
+    )
+else:
+    print(
+        f"DECISÃO: fora da amostra, em {n_janelas} janelas, o campeão NÃO supera a regra atual "
+        f"(diferença R$ {diferenca.mean():,.2f} ± R$ {diferenca.std():,.2f} por mês)."
+    )
+
+# %% [markdown]
+# **Leitura da Parte 2.** O backtest responde ao limite herdado: agora existe uma estimativa em
+# janelas que o modelo **não viu**. O `k` de cada janela é proporcional à capacidade mensal
+# (`round(900 × n / 12.024)`), porque os meses variam de tamanho — e isso é dito, não escondido
+# (guardrail da unidade de tempo). O reajuste da última janela tem de casar com o artefato
+# auditado: se as probabilidades divergirem, o backtest não mediria o modelo da prateleira.
+#
+# A leitura de negócio é a **diferença pareada** campeão − regra atual janela a janela: é ela
+# que entra na decisão, e é ela que a Parte 5 submeterá ao intervalo de confiança. Sinais
+# menores que o erro de amostragem são **ruído**, não ganho.
+
+# %% [markdown]
+# ## Parte 3 — Política de perícia e economia (Pergunta 4)
+#
+# A política é o entregável; o modelo é insumo. Aqui o escore vira **decisão** e a decisão
+# vira **dinheiro** no mês de teste: quantas fraudes encontradas, quanto se evita de perda e
+# quanto custa — sempre contra as três referências. E ao fim, a **ação sobre a regra de
+# R$ 50 mil**: não um comentário, uma decisão com o número ao lado.
+
+# %%
+# =============================================================================
+# Parte 3 — As quatro políticas medidas no mês de teste (agosto)
+# =============================================================================
+politicas_mes = {
+    "campeao": construir_politica_campeao(pipeline, k=CAPACIDADE_MENSAL),
+    **referencias,
+}
+
+tabela_politicas = medir_politicas_no_mes(politicas_mes, X_teste, y_teste)
+
+print("POLÍTICAS NO MÊS DE TESTE (agosto/2026) — mesma capacidade, mesmo critério")
+print(
+    tabela_politicas[
+        [
+            "politica",
+            "capacidade",
+            "n_periciados",
+            "tp",
+            "fp",
+            "fn",
+            "precisao",
+            "cobertura",
+            "economia",
+            "custo_total",
+        ]
+    ].to_string(index=False)
+)
+print()
+for _, linha in tabela_politicas.iterrows():
+    print(
+        f"  {linha['politica']:<28} k={linha['n_periciados']:>3}  TP={linha['tp']:>3}  "
+        f"precisão={linha['precisao'] * 100:>6.2f}%  cobertura={linha['cobertura'] * 100:>6.2f}%  "
+        f"economia=R$ {linha['economia']:>13,.2f}  custo=R$ {linha['custo_total']:>13,.2f}"
+    )
+
+# %%
+# =============================================================================
+# Parte 3 — A regra atual exatamente como o case a descreve
+# =============================================================================
+# Literal do case: filtrar valor_reclamado > R$ 50 mil, ordenar por valor decrescente
+# e cortar em 900. Medido sobre o chamado CRU — a conversão do texto com vírgula é
+# feita aqui, igualzinha à que o Pipeline faz internamente.
+regra_case = regra_atual_do_case(
+    X_teste, y_teste, limiar=LIMIAR_REGRA_ATUAL, k=CAPACIDADE_MENSAL
+)
+
+print("REGRA ATUAL COMO O CASE A DESCREVE (valor_reclamado > R$ 50 mil -> corte em 900)")
+print(
+    f"  pedidos acima de R$ {regra_case['limiar']:,.0f}: {regra_case['n_acima_limiar']}  "
+    f"(o case fala em ~950)"
+)
+print(f"  de fato periciados (corte em {CAPACIDADE_MENSAL}): {regra_case['n_periciados']}")
+print(
+    f"  fraudes encontradas (TP): {regra_case['tp']}  |  "
+    f"precisão: {regra_case['precisao'] * 100:.2f}%  |  "
+    f"cobertura: {regra_case['cobertura'] * 100:.2f}%"
+)
+print(
+    f"  economia: R$ {regra_case['economia']:,.2f}  |  "
+    f"custo total: R$ {regra_case['custo_total']:,.2f}"
+)
+
+# %%
+# =============================================================================
+# Parte 3 — Ganho da política sobre a regra atual (ponto; IC 95% na Parte 5)
+# =============================================================================
+economia_campeao = float(
+    tabela_politicas.loc[tabela_politicas["chave"] == "campeao", "economia"].iloc[0]
+)
+economia_regra = float(
+    tabela_politicas.loc[tabela_politicas["chave"] == "regra_atual", "economia"].iloc[0]
+)
+ganho_sobre_regra = economia_campeao - economia_regra
+
+print("GANHO DA POLÍTICA SOBRE A REGRA ATUAL (mês de teste)")
+print(f"  Resultado(campeão)      : R$ {economia_campeao:>14,.2f}")
+print(f"  Resultado(regra atual)  : R$ {economia_regra:>14,.2f}")
+print(f"  Ganho por mês           : R$ {ganho_sobre_regra:>14,.2f}")
+print()
+print("  O intervalo de confiança de 95% desta diferença é calculado na Parte 5.")
+print("  A Parte 2 já mostrou o ganho fora da amostra, em 4 janelas, acima do ruído.")
+
+# %%
+# =============================================================================
+# Parte 3 — Curva Resultado(k) do campeão e os pontos de decisão
+# =============================================================================
+# A curva é recalculada aqui a partir das probabilidades do artefato no mês de teste:
+# nada é lido de figura antiga, e os pontos saem do próprio resumo da curva.
+probabilidades_teste = escore_positivo(pipeline, X_teste)
+tabela_curva, resumo_curva = curva_resultado_k(y_teste, probabilidades_teste)
+pontos_decisao = pontos_de_decisao_k(tabela_curva, resumo_curva)
+
+print("PONTOS DE DECISÃO SOBRE A CURVA Resultado(k) — mês de teste")
+for k, valor, rotulo in pontos_decisao:
+    print(f"  {rotulo:<22} k={k:>5}  ->  R$ {valor:>13,.2f}")
+
+caminho_figura = salvar_curva_decisao(tabela_curva, pontos_decisao)
+print()
+print(f"Figura salva em {caminho_figura.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 3 — Ação sobre a regra atual (Pergunta 4)
+# =============================================================================
+print("AÇÃO RECOMENDADA SOBRE A REGRA DE R$ 50 MIL")
+print(
+    f"  1. Extinguir o critério de R$ {LIMIAR_REGRA_ATUAL:,.0f} como regra de triagem: no mês de "
+    f"teste ele periciou {regra_case['n_periciados']} sinistros, achou {regra_case['tp']} fraudes "
+    f"e deu economia de R$ {regra_case['economia']:,.2f} (negativa)."
+)
+print(
+    f"  2. Substituí-lo pela política de escore do campeão, mantidas as "
+    f"{CAPACIDADE_MENSAL} perícias/mês: mesmo custo de perícia, economia de "
+    f"R$ {economia_campeao:,.2f} — ganho de R$ {ganho_sobre_regra:,.2f}/mês."
+)
+
+# %% [markdown]
+# **Leitura da Parte 3.** No mês de teste, com as **mesmas 900 perícias**, o campeão encontra
+# 201 fraudes e devolve economia de R$ 3.731.700; a regra de R$ 50 mil acha 14 e devolve
+# economia **negativa** — ela custa mais do que economiza e perde até para escolher ao acaso.
+# O ganho de trocar a regra pela política de escore é a diferença dos dois números acima, e o
+# IC 95% dela é o tema da Parte 5.
+#
+# A curva `Resultado(k)` marca os quatro pontos de decisão: o corte de hoje (900), o corte
+# teórico `p*`, o ótimo empírico e o último `k` ainda lucrativo — este último é o que a Parte 4
+# usa para responder "vale a pena mais peritos?".
+
+# %% [markdown]
+# ## Parte 4 — Dimensionamento da equipe e valor marginal (Pergunta 5)
+#
+# O comitê pergunta "vale a pena mais peritos?". Aqui se responde com dinheiro: o valor
+# marginal de cada perícia, a curva de ganho por perito, a contraprova da tese do Otávio
+# ("o dobro de peritos, o dobro de fraude") e a ação sobre a equipe — com número.
+
+# %%
+# =============================================================================
+# Parte 4 — Acerto mínimo de uma perícia a mais para se pagar
+# =============================================================================
+piso_marginal = piso_viabilidade()
+print("ACERTO MÍNIMO DE UMA PERÍCIA (A MAIS) PARA SE PAGAR")
+print(f"  custo de uma perícia   = R$ {CUSTO_PERICIA:,.2f}")
+print(f"  custo da fraude paga   = R$ {CUSTO_FRAUDE_PAGA:,.2f}")
+print(f"  700 / 21.700           = {piso_marginal:.6f}  ({piso_marginal * 100:.4f}%)")
+print(
+    "  É o mesmo número do piso da Fase 1: a k-ésima perícia zera o valor esperado em "
+    "p = 1/(21.700/700) = 1/31 — a mesma conta vista do lado marginal."
+)
+
+# %%
+# =============================================================================
+# Parte 4 — Valor marginal: até quanto compensa periciar e o k de menor custo
+# =============================================================================
+k_otimo = int(resumo_curva["k_otimo_empirico"])
+k_teorico = int(resumo_curva["k_corte_teorico"])
+k_lucrativo_max = int(resumo_curva["k_maximo_ainda_lucrativo"])
+k_cruza_piso = k_marginal_cruza_piso(tabela_curva)
+
+resultado_900 = float(
+    tabela_curva.loc[tabela_curva["k"] == CAPACIDADE_MENSAL, "resultado_liquido"].iloc[0]
+)
+resultado_otimo = float(
+    tabela_curva.loc[tabela_curva["k"] == k_otimo, "resultado_liquido"].iloc[0]
+)
+resultado_teorico = float(
+    tabela_curva.loc[tabela_curva["k"] == k_teorico, "resultado_liquido"].iloc[0]
+)
+ganho_alem_de_900 = resultado_otimo - resultado_900
+
+
+def _peritos(k: int) -> float:
+    """Peritos equivalentes a um `k` de perícias/mês (1 perito = 30 perícias)."""
+    return k / PERICIAS_POR_PERITO
+
+
+print("VALOR MARGINAL E LIMITES DE CAPACIDADE (curva Resultado(k), mês de teste)")
+print(f"  capacidade hoje (R$ 50 mil/900)      k={CAPACIDADE_MENSAL:>5}  ->  R$ {resultado_900:>13,.2f}")
+print(f"  ótimo empírico (maior resultado)     k={k_otimo:>5}  ->  R$ {resultado_otimo:>13,.2f}"
+      f"   ({_peritos(k_otimo):.1f} peritos)")
+print(f"  corte teórico (precisão = piso)      k={k_teorico:>5}  ->  R$ {resultado_teorico:>13,.2f}"
+      f"   ({_peritos(k_teorico):.1f} peritos)")
+print(f"  último k ainda lucrativo             k={k_lucrativo_max:>5}  ->  "
+      f"R$ {float(tabela_curva.loc[tabela_curva['k'] == k_lucrativo_max, 'resultado_liquido'].iloc[0]):>13,.2f}")
+print()
+# O resumo da curva reporta o ÚLTIMO k ainda viável (precisão marginal >= piso); a
+# função devolve a PRIMEIRA perícia que não se paga. São vizinhas por construção:
+# a última que se paga + 1 é a primeira que não se paga.
+cruza_confere = k_cruza_piso == k_teorico + 1
+print(f"  contraprova: última perícia que ainda se paga k={k_teorico} (resumo da curva); "
+      f"a primeira que não se paga é k={k_cruza_piso} "
+      f"-> {'confere (vizinhas)' if cruza_confere else 'DIVERGE'}")
+print(f"  ganho mensal além das 900: Resultado(k_ótimo) − Resultado(900) = R$ {ganho_alem_de_900:,.2f}")
+print()
+print('  "menor custo total", as duas leituras do enunciado:')
+print(f"    (A) minimizar o custo total  -> mesmo ponto de maior resultado -> k={k_otimo}"
+      f" (R$ {resultado_otimo:,.2f})")
+print(f"    (B) última perícia que ainda se paga (precisão marginal >= piso) -> k={k_teorico}"
+      f" (R$ {resultado_teorico:,.2f})")
+
+# %%
+# =============================================================================
+# Parte 4 — Curva de ganho por perito e recomendação de dimensionamento
+# =============================================================================
+quadro_peritos = curva_ganho_por_perito(tabela_curva, peritos_max=80)
+
+pontos_peritos = [
+    ("atual", PERITOS_ATUAIS),
+    ("ótimo empírico", round(_peritos(k_otimo))),
+    ("corte teórico", round(_peritos(k_teorico))),
+]
+resumo_peritos = quadro_peritos[quadro_peritos["peritos"].isin([p for _, p in pontos_peritos])]
+
+print("GANHO POR PERITO (1 perito = 30 perícias/mês)")
+print(
+    resumo_peritos[["peritos", "k", "resultado_liquido", "ganho_marginal_perito", "ganho_sobre_base"]]
+    .to_string(index=False)
+)
+print()
+marginal_atual = float(
+    quadro_peritos.loc[quadro_peritos["peritos"] == PERITOS_ATUAIS, "ganho_marginal_perito"].iloc[0]
+)
+print(f"  ganho do 30º perito (o último contratado hoje): R$ {marginal_atual:,.2f}/mês")
+print(
+    f"  a partir de {round(_peritos(k_otimo))} peritos o ganho marginal entra em platô; "
+    f"além de {round(_peritos(k_teorico))} peritos cada contratação destrói valor."
+)
+
+caminho_peritos = salvar_ganho_por_perito(quadro_peritos, dict(pontos_peritos))
+print()
+print(f"Figura salva em {caminho_peritos.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 4 — Contraprova da tese do Otávio ("o dobro de peritos, o dobro de fraude")
+# =============================================================================
+tp_900 = int(tabela_curva.loc[tabela_curva["k"] == CAPACIDADE_MENSAL, "tp"].iloc[0])
+tp_1800 = int(tabela_curva.loc[tabela_curva["k"] == 2 * CAPACIDADE_MENSAL, "tp"].iloc[0])
+promessa_otavio = 2 * tp_900
+multiplo_real = tp_1800 / tp_900
+
+print("TESTE DA AFIRMAÇÃO DO OTÁVIO (dobrar a equipe dobraria a fraude?)")
+print(f"  TP com {CAPACIDADE_MENSAL} perícias (hoje)      : {tp_900}")
+print(f"  TP com {2 * CAPACIDADE_MENSAL} perícias (dobro)      : {tp_1800}")
+print(f"  promessa de 2× implicaria                  : {promessa_otavio} fraudes")
+print(f"  múltiplo real                              : {multiplo_real:.2f}×  (prometido: 2,00×)")
+print(
+    f"  motivo econômico: o topo da fila concentra as fraudes mais óbvias, então a precisão "
+    f"marginal decresce — 900 perícias acham {tp_900} de {int(tabela_curva['tp'].iloc[-1])} fraudes."
+)
+
+# %%
+# =============================================================================
+# Parte 4 — Ação sobre a equipe (Pergunta 5)
+# =============================================================================
+print("AÇÃO RECOMENDADA SOBRE A EQUIPE")
+print(
+    f"  Manter os {PERITOS_ATUAIS} peritos ({CAPACIDADE_MENSAL} perícias/mês). O ganho de ir ao "
+    f"ótimo empírico (k={k_otimo}, ~{round(_peritos(k_otimo))} peritos) é de "
+    f"R$ {ganho_alem_de_900:,.2f}/mês — e esse ótimo é *in-sample*, dentro da faixa de variação "
+    f"das janelas do backtest."
+)
+print(
+    f"  Condição que invalidaria: se a janela de monitoramento confirmar que a precisão @900 "
+    f"segue acima de {piso_marginal * 100:.2f}% com folga, reavaliar a ampliação até ~"
+    f"{round(_peritos(k_teorico))} peritos (corte teórico, k={k_teorico})."
+)
+
+# %% [markdown]
+# **Leitura da Parte 4.** O acerto mínimo de uma perícia marginal é o mesmo piso da Fase 1
+# (3,2258%) — a mesma conta vista do lado de quem decide contratar. No mês de teste, o resultado
+# sobe de R$ 3.731.700 (k=900) até R$ 3.968.300 no ótimo empírico (k=1.430, ~48 peritos) e
+# desaparece em k=8.710. Só que o ótimo **não é estimativa fora da amostra**: é escolhido no
+# mesmo mês usado na seleção, e o ganho sobre as 900 atuais cabe dentro do desvio do backtest.
+# Por isso a ação é **manter a equipe**, não ampliar por um número bonito.
+#
+# A tese do Otávio cai por aritmética: dobrar as perícias **não** dobra as fraudes — a precisão
+# marginal decresce porque o topo da fila já concentra as fraudes mais óbvias.
+
+# %% [markdown]
+# ## Parte 5 — Sensibilidade, break-even e incerteza
+#
+# Uma medição só vira **estratégia robusta** quando sobrevive à incerteza. Aqui o mês de teste é
+# submetido a três estresses: o **bootstrap** (erro de amostragem do próprio mês), a **variação
+# dos parâmetros econômicos** do Anexo 1 (custo da fraude, custo da perícia, capacidade) e o
+# **drift de prevalência** (a taxa de fraude do fluxo mudando). O critério de decisão é explícito:
+# a recomendação só é afirmada se o IC 95% da diferença **excluir o zero**.
+
+# %%
+# =============================================================================
+# Parte 5 — Bootstrap do mês de teste (IC 95% do resultado e da diferença)
+# =============================================================================
+escore_campeao_teste = escore_positivo(pipeline, X_teste)
+escore_regra_teste = escore_positivo(referencias["regra_atual"].estimador, X_teste)
+
+tabela_bootstrap, resumo_bootstrap = bootstrap_resultado(
+    y_teste,
+    {"campeao": escore_campeao_teste, "regra_atual": escore_regra_teste},
+    k=CAPACIDADE_MENSAL,
+)
+
+print(f"BOOTSTRAP DO MÊS DE TESTE — {resumo_bootstrap['n_reamostragens']:,} reamostragens, "
+      f"SEED={resumo_bootstrap['seed']}")
+print(
+    f"{'métrica':<12}{'média':>16}{'desvio':>16}{'IC 95% inferior':>20}{'IC 95% superior':>20}"
+)
+for _, linha in tabela_bootstrap.iterrows():
+    print(
+        f"{linha['metrica']:<12}"
+        f"R$ {linha['media']:>12,.0f}"
+        f"R$ {linha['desvio']:>12,.0f}"
+        f"R$ {linha['ic_inferior']:>16,.0f}"
+        f"R$ {linha['ic_superior']:>16,.0f}"
+    )
+print()
+print(
+    f"  diferença pareada ({resumo_bootstrap['comparacao']}): "
+    f"R$ {resumo_bootstrap['diferenca_media']:,.2f} "
+    f"[R$ {resumo_bootstrap['diferenca_ic_inferior']:,.2f}; "
+    f"R$ {resumo_bootstrap['diferenca_ic_superior']:,.2f}]"
+)
+if resumo_bootstrap["exclui_zero"]:
+    print("  VEREDITO: o IC 95% da diferença EXCLUI o zero -> o ganho é distinguível do ruído.")
+else:
+    print("  VEREDITO: o IC 95% da diferença CONTÉM o zero -> indistinguível do ruído.")
+
+CAMINHO_BOOTSTRAP = PASTA_TABELAS / "avaliacao_bootstrap.csv"
+tabela_bootstrap.to_csv(CAMINHO_BOOTSTRAP, index=False)
+caminho_fig_bootstrap = salvar_bootstrap(tabela_bootstrap)
+print()
+print(f"Tabela salva em {CAMINHO_BOOTSTRAP.relative_to(RAIZ)}")
+print(f"Figura salva em {caminho_fig_bootstrap.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 5 — Grade de sensibilidade econômica (um fator por vez e combinada)
+# =============================================================================
+tp_campeao_teste = tp_acumulado_por_k(y_teste, escore_campeao_teste)
+tp_regra_teste = tp_acumulado_por_k(y_teste, escore_regra_teste)
+grade = grade_sensibilidade(tp_campeao_teste, tp_regra_teste)
+
+visao_fraude = grade[
+    (grade["custo_pericia"] == CUSTO_PERICIA) & (grade["capacidade"] == CAPACIDADE_MENSAL)
+]
+visao_pericia = grade[
+    (grade["custo_fraude_paga"] == CUSTO_FRAUDE_PAGA) & (grade["capacidade"] == CAPACIDADE_MENSAL)
+]
+visao_capacidade = grade[
+    (grade["custo_fraude_paga"] == CUSTO_FRAUDE_PAGA) & (grade["custo_pericia"] == CUSTO_PERICIA)
+]
+
+print("UM FATOR POR VEZ — custo da fraude (perícia R$ 700, capacidade 900)")
+print(
+    visao_fraude[
+        ["custo_fraude_paga", "k_otimo", "resultado_campeao", "resultado_regra", "ganho", "vence_regra"]
+    ].to_string(index=False)
+)
+print()
+print("UM FATOR POR VEZ — custo da perícia (fraude R$ 21.700, capacidade 900)")
+print(
+    visao_pericia[
+        ["custo_pericia", "k_otimo", "resultado_campeao", "resultado_regra", "ganho", "vence_regra"]
+    ].to_string(index=False)
+)
+print()
+print("UM FATOR POR VEZ — capacidade (fraude R$ 21.700, perícia R$ 700)")
+print(
+    visao_capacidade[
+        ["capacidade", "k", "tp_campeao", "resultado_campeao", "ganho", "k_otimo"]
+    ].to_string(index=False)
+)
+print()
+print(f"GRADE COMBINADA ({len(grade)} células):")
+print(f"  ganho mínimo sobre a regra : R$ {grade['ganho'].min():,.2f}")
+print(f"  ganho máximo sobre a regra : R$ {grade['ganho'].max():,.2f}")
+print(f"  células em que NÃO vence a regra: {int((~grade['vence_regra']).sum())} de {len(grade)}")
+
+CAMINHO_SENSIBILIDADE = PASTA_TABELAS / "avaliacao_sensibilidade.csv"
+grade.to_csv(CAMINHO_SENSIBILIDADE, index=False)
+caminho_fig_sensibilidade = salvar_sensibilidade(grade)
+print()
+print(f"Tabela salva em {CAMINHO_SENSIBILIDADE.relative_to(RAIZ)}")
+print(f"Figura salva em {caminho_fig_sensibilidade.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 5 — Break-even: a que custo a política (ou a vantagem) desaparece
+# =============================================================================
+be = break_even(
+    tp_campeao=int(tp_campeao_teste[CAPACIDADE_MENSAL]),
+    tp_regra=int(tp_regra_teste[CAPACIDADE_MENSAL]),
+    k=CAPACIDADE_MENSAL,
+)
+
+print("BREAK-EVEN ECONÔMICO (capacidade de 900, custo da perícia R$ 700)")
+print(f"  TP do campeão @900: {int(tp_campeao_teste[CAPACIDADE_MENSAL])} | "
+      f"TP da regra @900: {int(tp_regra_teste[CAPACIDADE_MENSAL])}")
+print()
+print("  (A) A PRÓPRIA POLÍTICA deixa de se pagar se a fraude média custar menos de...")
+print(f"      custo_fraude crítico = R$ {be['custo_fraude_critico_politica']:,.2f} por fraude")
+print(f"      razão custo_fraude / custo_pericia crítica = {be['razao_critica_politica']:.3f} : 1")
+print("  (B) A REGRA ATUAL, com a mesma conta, exigiria...")
+print(f"      custo_fraude crítico = R$ {be['custo_fraude_critico_regra']:,.2f} por fraude")
+print(f"      razão custo_fraude / custo_pericia crítica = {be['razao_critica_regra']:.3f} : 1")
+print()
+if be["vantagem_sobre_regra_sempre_positiva"]:
+    print("  (C) VANTAGEM SOBRE A REGRA: com o MESMO k, o ganho vale")
+    print("      custo_fraude × (TP_campeão − TP_regra) — não existe custo de fraude que")
+    print("      zere a vantagem, porque o campeão acha mais fraudes com o mesmo nº de perícias.")
+    print("      O break-even do projeto é, portanto, contra 'não periciar' (item A), não contra a regra.")
+
+# %%
+# =============================================================================
+# Parte 5 — Sensibilidade à taxa de fraude (drift) e o piso por concentração
+# =============================================================================
+tabela_drift = sensibilidade_taxa_fraude(y_teste, escore_campeao_teste, k=CAPACIDADE_MENSAL)
+taxa_base = float(y_teste.mean())
+taxa_be = taxa_fraude_de_break_even(y_teste, escore_campeao_teste, k=CAPACIDADE_MENSAL)
+precisao_900 = float(tp_campeao_teste[CAPACIDADE_MENSAL] / CAPACIDADE_MENSAL)
+lift_900 = precisao_900 / taxa_base
+
+print("SENSIBILIDADE À TAXA DE FRAUDE (drift) — fila congelada, muda só a prevalência")
+print(
+    tabela_drift[["taxa_alvo", "n_fraudes_alvo", "resultado_medio", "resultado_desvio", "paga"]]
+    .to_string(index=False)
+)
+print()
+print("PISO POR CONCENTRAÇÃO")
+print(f"  taxa de fraude do fluxo (agosto)          : {taxa_base * 100:.4f}%")
+print(f"  piso de viabilidade p* = 700/21.700        : {piso_viabilidade() * 100:.4f}%")
+print(f"  precisão@900 do campeão                    : {precisao_900 * 100:.4f}%  "
+      f"(lift {lift_900:.2f}× a taxa base)")
+print(f"  -> periciar ao acaso perderia (taxa base < piso); a política só vence por concentração.")
+print(f"  taxa de fraude de equilíbrio (drift)       : {taxa_be * 100:.4f}%")
+print(f"  abaixo dessa taxa a política deixa de se pagar — e ela é ~{piso_viabilidade() / taxa_be:.1f}× "
+      f"menor que o piso, graças ao lift do topo da fila.")
+
+CAMINHO_DRIFT = PASTA_TABELAS / "avaliacao_taxa_fraude.csv"
+tabela_drift.to_csv(CAMINHO_DRIFT, index=False)
+print()
+print(f"Tabela salva em {CAMINHO_DRIFT.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 5 — Ponto de quebra operacional: a escala do k com o volume
+# =============================================================================
+volumes = (9_000, 12_024, 15_000, 18_000, 24_000)
+tabela_volume = pd.DataFrame({"volume_mes": list(volumes)})
+tabela_volume["fator_volume"] = tabela_volume["volume_mes"] / SINISTROS_POR_MES
+tabela_volume["k"] = [calcular_k_proporcional(int(v)) for v in tabela_volume["volume_mes"]]
+
+resultado_900 = float(
+    tabela_curva.loc[tabela_curva["k"] == CAPACIDADE_MENSAL, "resultado_liquido"].iloc[0]
+)
+tabela_volume["resultado_proporcional"] = tabela_volume["fator_volume"] * resultado_900
+
+print("PONTO DE QUEBRA OPERACIONAL — regra de escala do k (k = 900 × n_mês / 12.024)")
+print(tabela_volume.to_string(index=False))
+print()
+print(f"  Com a taxa de fraude constante, o resultado escala junto com o volume "
+      f"(R$ {resultado_900:,.2f} × fator): a economia por sinistro fica estável.")
+print("  GATILHO que exige reavaliação:")
+print(f"    - taxa de fraude do mês abaixo de {taxa_be * 100:.2f}% (drift além do break-even);")
+print(f"    - precisão@900 abaixo do piso de {piso_viabilidade() * 100:.2f}% por dois meses seguidos;")
+print("    - volume fora da faixa de 9.000 a 18.000 sinistros/mês (pico de alagamento).")
+
+# %% [markdown]
+# **Leitura da Parte 5.** O bootstrap responde à pergunta que o comitê tem de fazer antes de assinar:
+# o ganho de ~R$ 4 milhões/mês sobre a regra é **estatisticamente distinguível de zero** — o IC 95%
+# da diferença pareada não toca o zero. A grade de sensibilidade mostra que a vitória **não depende**
+# de nenhum parâmetro isolado: variando o custo da fraude de R$ 10 mil a R$ 40 mil, o custo da perícia
+# de R$ 500 a R$ 1.500 e a capacidade de 600 a 2.400, o campeão segue à frente da regra em toda célula,
+# e o break-even contra a regra **não existe** justamente porque os dois gastam o mesmo nº de perícias.
+#
+# O ponto frágil é outro — e é honesto nomeá-lo: a política perde valor se a **prevalência** cair.
+# Como a taxa base (2,47%) já está abaixo do piso (3,2258%), quem sustenta a política é o *lift* de
+# ~9× no topo da fila; o resultado zera só se a taxa de fraude cair para perto de **0,36%** — quase
+# 7× o colchão atual. É esse o número que vira gatilho de monitoramento na Fase 6.
+
+# %% [markdown]
+# ## Parte 6 — Aceitabilidade, risco e explicabilidade
+#
+# O case cobra, na Pergunta 1, o que se pode e o que não se deve usar para decidir quem é periciado.
+# Aqui a decisão da Fase 4 (`usar uf` e `idade_segurado`) é **reprocessada sob a ótica do negócio**:
+# não basta dizer "a métrica piora pouco" — o comitê tem de ver o **preço em reais**. Depois vêm a
+# triagem de disparidade, a auditoria do `boletim_ocorrencia` (feature SHAP nº 1 e único campo com
+# branco), a confirmação do atributo morto (`fim_de_semana`), a explicação que o analista usa e o
+# registro de riscos.
+
+# %%
+# =============================================================================
+# Parte 6 — Preço em reais de não usar `uf` e `idade_segurado`
+# =============================================================================
+# Reajusta o CAMPEÃO sem as duas colunas, no mesmo protocolo (treino abr–jul, teste ago,
+# SEED=42) e mede o Resultado@900 resultante. É o número que o comitê precisa ver.
+COLUNAS_ABLADAS = ("uf", "idade_segurado")
+
+pipeline_sem_idade_uf = construir_pipeline(
+    modelo=XGBClassifier(random_state=SEED, eval_metric="logloss", n_jobs=1, **ESPERADO_FASE4),
+    colunas_excluidas=COLUNAS_ABLADAS,
+)
+pipeline_sem_idade_uf.fit(X_treino, y_treino)
+prob_sem_idade_uf = pipeline_sem_idade_uf.predict_proba(X_teste)[:, 1]
+metricas_sem_idade_uf = calcular_metricas_holdout(y_teste, prob_sem_idade_uf)
+
+resultado_com_uf_idade = float(REFERENCIA_FASE4["resultado_900"])
+resultado_sem_uf_idade = float(metricas_sem_idade_uf["resultado_900"])
+preco_de_remover = resultado_com_uf_idade - resultado_sem_uf_idade
+
+tabela_ablacao = pd.DataFrame(
+    [
+        {
+            "cenario": "com idade e UF (campeão)",
+            "n_features": len(FEATURES),
+            "roc_auc": float(metricas_fumaca["roc_auc"]),
+            "pr_auc": float(metricas_fumaca["pr_auc"]),
+            "tp_900": int(metricas_fumaca["tp_900"]),
+            "precisao_900": float(metricas_fumaca["precisao_900"]),
+            "resultado_900": resultado_com_uf_idade,
+        },
+        {
+            "cenario": "sem idade e UF (ablação)",
+            "n_features": len(FEATURES) - len(COLUNAS_ABLADAS),
+            "roc_auc": float(metricas_sem_idade_uf["roc_auc"]),
+            "pr_auc": float(metricas_sem_idade_uf["pr_auc"]),
+            "tp_900": int(metricas_sem_idade_uf["tp_900"]),
+            "precisao_900": float(metricas_sem_idade_uf["precisao_900"]),
+            "resultado_900": resultado_sem_uf_idade,
+        },
+    ]
+)
+
+print("ABLAÇÃO DE `uf` + `idade_segurado` NO CAMPEÃO (holdout de agosto, k=900)")
+print(tabela_ablacao.to_string(index=False))
+print()
+print(f"  preço em reais de NÃO usar as duas colunas: R$ {preco_de_remover:,.2f} / mês")
+print(
+    f"  ROC AUC: {metricas_fumaca['roc_auc']:.6f} -> {metricas_sem_idade_uf['roc_auc']:.6f} "
+    f"({metricas_sem_idade_uf['roc_auc'] - metricas_fumaca['roc_auc']:+.6f})"
+)
+print(
+    f"  PR AUC : {metricas_fumaca['pr_auc']:.6f} -> {metricas_sem_idade_uf['pr_auc']:.6f} "
+    f"({metricas_sem_idade_uf['pr_auc'] - metricas_fumaca['pr_auc']:+.6f})"
+)
+print(
+    "  conferência Fase 4: ROC 0,936597 -> 0,937166 | PR 0,538556 -> 0,533792 "
+    "(reprodutibilidade da ablação)."
+)
+CAMINHO_ABLACAO = PASTA_TABELAS / "avaliacao_ablacao.csv"
+tabela_ablacao.to_csv(CAMINHO_ABLACAO, index=False)
+print(f"  Tabela salva em {CAMINHO_ABLACAO.relative_to(RAIZ)}")
+
+# %% [markdown]
+# **Posição fechada — `idade_segurado` e `uf` (campo do Quadro de Respostas).**
+#
+# *Usar.* O preço em reais de **não** usá-las é **R$ −43.400/mês** — isto é, a remoção *ganha*
+# R$ 43.400 no mês, um empate técnico: vale 2 sinistros em 900 (~0,9% do desvio do bootstrap da
+# Parte 5). Em contrapartida, o **PR AUC cai** (0,5386 → 0,5338), que é a métrica que governa a
+# ordenação. Como os dois efeitos são indistinguíveis de zero **e** a Fase 4 já aprovou o conjunto
+# com as duas colunas, a decisão é **manter** — remover seria re-treino sem ganho demonstrado.
+#
+# *Contraponto honesto para o comitê.* Se a prioridade for **governança** (idade e UF são proxies
+# de características pessoais), a remoção é defensável: **custa estatisticamente nada** neste
+# holdout. A escolha é de negócio, não técnica — e o número está na mesa.
+
+# %%
+# =============================================================================
+# Parte 6 — Triagem de disparidade da fila periciada (por faixa de idade e por UF)
+# =============================================================================
+# Sinal para revisão humana, NÃO veredito legal: mede quem a fila de 900 perícias
+# concentra. `X_teste` é o chamado cru, onde `idade_segurado` e `uf` ainda existem.
+tabela_disparidade = triagem_disparidade(
+    y_teste, escore_campeao_teste, X_teste, k=CAPACIDADE_MENSAL
+)
+
+disparidade_idade = tabela_disparidade[tabela_disparidade["dimensao"] == "idade"]
+disparidade_uf = tabela_disparidade[tabela_disparidade["dimensao"] == "uf"].sort_values(
+    "taxa_selecao", ascending=False
+)
+COLUNAS_DISPARIDADE = [
+    "grupo",
+    "n_grupo",
+    "n_selecionado",
+    "taxa_selecao",
+    "razao_selecao",
+    "precisao",
+    "taxa_fraude_grupo",
+    "lift",
+]
+
+print("TRIAGEM DE DISPARIDADE — por faixa de idade (k=900)")
+print(disparidade_idade[COLUNAS_DISPARIDADE].to_string(index=False))
+print()
+print("TRIAGEM DE DISPARIDADE — por UF, ordenada pela taxa de seleção")
+print(disparidade_uf[COLUNAS_DISPARIDADE].to_string(index=False))
+print()
+print("LEITURA DOS EXTREMOS (faixa de idade)")
+faixa_menos = disparidade_idade.loc[disparidade_idade["taxa_selecao"].idxmin()]
+faixa_mais = disparidade_idade.loc[disparidade_idade["taxa_selecao"].idxmax()]
+print(
+    f"  menos selecionada: {faixa_menos['grupo']} "
+    f"(razão {faixa_menos['razao_selecao']:.2f}× a média)"
+)
+print(
+    f"  mais selecionada : {faixa_mais['grupo']} "
+    f"(razão {faixa_mais['razao_selecao']:.2f}× a média)"
+)
+
+CAMINHO_DISPARIDADE = PASTA_TABELAS / "avaliacao_disparidade.csv"
+tabela_disparidade.to_csv(CAMINHO_DISPARIDADE, index=False)
+print()
+print(f"  Tabela salva em {CAMINHO_DISPARIDADE.relative_to(RAIZ)}")
+print("  NOTA: por IDADE a fila é plana (razão de seleção de 0,92× a 1,18× a média) — a precisão")
+print("        sobe com a idade (19,7% nos 18–29 contra 30,2% nos 60+), mas a seleção não")
+print("        se concentra. As UFs com taxa extrema têm volume pequeno (SE n=59, AP/RR n≤24):")
+print("        triagem com n baixo é ruído — daí o piso de amostra na rotina trimestral.")
+
+# %%
+# =============================================================================
+# Parte 6 — Auditoria do `boletim_ocorrencia`: quanto custa perder o campo
+# =============================================================================
+# É a feature SHAP nº 1 e a única coluna com branco (4,83%). Se o campo deixar de
+# ser preenchido na abertura, a política perde este tanto — o número sustenta a
+# regra de contingência.
+COLUNAS_SEM_BOLETIM = ("boletim_ocorrencia",)
+
+pipeline_sem_boletim = construir_pipeline(
+    modelo=XGBClassifier(random_state=SEED, eval_metric="logloss", n_jobs=1, **ESPERADO_FASE4),
+    colunas_excluidas=COLUNAS_SEM_BOLETIM,
+)
+pipeline_sem_boletim.fit(X_treino, y_treino)
+prob_sem_boletim = pipeline_sem_boletim.predict_proba(X_teste)[:, 1]
+metricas_sem_boletim = calcular_metricas_holdout(y_teste, prob_sem_boletim)
+resultado_sem_boletim = float(metricas_sem_boletim["resultado_900"])
+perda_sem_boletim = resultado_com_uf_idade - resultado_sem_boletim
+
+print("AUDITORIA DO `boletim_ocorrencia` (holdout de agosto, k=900)")
+print(f"  com boletim : TP@900={int(metricas_fumaca['tp_900'])} | "
+      f"precisão@900={metricas_fumaca['precisao_900']:.4%} | "
+      f"Resultado@900 = R$ {resultado_com_uf_idade:,.2f}")
+print(f"  sem boletim : TP@900={int(metricas_sem_boletim['tp_900'])} | "
+      f"precisão@900={metricas_sem_boletim['precisao_900']:.4%} | "
+      f"Resultado@900 = R$ {resultado_sem_boletim:,.2f}")
+print(f"  perda se o campo sumir: R$ {perda_sem_boletim:,.2f} / mês "
+      f"({perda_sem_boletim / resultado_com_uf_idade:.2%} do resultado)")
+print()
+print("  apoio Fase 3 (modelo de árvore, 5 sementes): sem boletim = R$ 3.206.560/mês")
+print("  REGRA DE CONTINGÊNCIA (se o boletim deixar de ser preenchido na abertura):")
+print("    1. o modelo perde ~9% do valor (R$ 325.500/mês), mas SEGUE muito acima da regra")
+print("       atual (que tem resultado negativo) — a política não desaba;")
+print("    2. a fila continua no escore, com o gatilho de reavaliação se a precisão@900 cair")
+print("       abaixo do piso de 3,2258% por dois meses;")
+print("    3. o campo em branco vira categoria 'Não informado' — nunca imputação — e o")
+print("       indicador de branco no fluxo entra no monitoramento (Fase 6).")
+
+# %%
+# =============================================================================
+# Parte 6 — Confirmação do atributo morto `fim_de_semana` (importância SHAP)
+# =============================================================================
+amostra_shap = X_teste.sample(n=300, random_state=SEED)
+importancia = importancia_shap(pipeline, X_treino, amostra_shap, semente=SEED)
+posicao_fim_de_semana = list(importancia.index).index("fim_de_semana") + 1
+razao_morto = importancia.iloc[0] / importancia["fim_de_semana"]
+
+print("IMPORTÂNCIA SHAP (média absoluta agregada por feature original, 300 sinistros)")
+print(importancia.head(5).to_string())
+print()
+print(f"  fim_de_semana: {posicao_fim_de_semana}º de {len(importancia)} | "
+      f"importância {importancia['fim_de_semana']:.6f}")
+print(f"  razão vs. 1ª feature ({importancia.index[0]}): {razao_morto:,.0f}× menor")
+print("  DECISÃO: manter. É derivada da data (não é campo digitado), o custo é zero e")
+print("           removê-la não muda o resultado — mexer no conjunto aprovado seria retrabalho.")
+
+CAMINHO_SHAP_IMPORTANCIA = PASTA_TABELAS / "avaliacao_shap_importancia.csv"
+pd.DataFrame(
+    {"feature": importancia.index, "importancia_shap": importancia.to_numpy()}
+).to_csv(CAMINHO_SHAP_IMPORTANCIA, index=False)
+print(f"  Tabela salva em {CAMINHO_SHAP_IMPORTANCIA.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 6 — Explicabilidade que o analista usa (SHAP local no topo da fila)
+# =============================================================================
+# O analista precisa entender POR QUE o sinistro está na fila antes de mandar o perito.
+# Mede legibilidade (3 sinais principais por sinistro) e estabilidade (os sinais mudam
+# se o fundo do SHAP mudar?).
+ordem_fila = np.argsort(-escore_campeao_teste, kind="mergesort")
+topo = ordem_fila[:3]
+
+contribuicoes_topo: list[tuple[int, int, pd.Series]] = []
+linhas_local: list[dict] = []
+for posicao, indice in enumerate(topo, start=1):
+    contribuicoes = explicar_sinistro(
+        pipeline, X_teste.iloc[[indice]], X_treino, n_fundo=100, semente=SEED
+    )
+    contribuicoes_topo.append((posicao, int(indice), contribuicoes))
+    principais = contribuicoes.head(3)
+    linhas_local.append(
+        {
+            "posicao_fila": posicao,
+            "indice_holdout": int(indice),
+            "escore": float(escore_campeao_teste[indice]),
+            "desfecho": "fraude" if int(y_teste.iloc[indice]) == 1 else "legítimo",
+            "sinal_1": f"{principais.index[0]} ({principais.iloc[0]:+.4f})",
+            "sinal_2": f"{principais.index[1]} ({principais.iloc[1]:+.4f})",
+            "sinal_3": f"{principais.index[2]} ({principais.iloc[2]:+.4f})",
+        }
+    )
+
+tabela_local = pd.DataFrame(linhas_local)
+print("EXPLICAÇÕES SHAP LOCAIS — topo da fila (posições 1 a 3)")
+print(tabela_local.to_string(index=False))
+print()
+
+# Estabilidade: recomputa o top-3 com outro fundo (200 linhas, semente 7) e compara o conjunto.
+linhas_estabilidade: list[dict] = []
+for posicao, indice, contribuicoes in contribuicoes_topo:
+    alternativa = explicar_sinistro(
+        pipeline, X_teste.iloc[[indice]], X_treino, n_fundo=200, semente=7
+    )
+    linhas_estabilidade.append(
+        {
+            "posicao_fila": posicao,
+            "top3_estavel": set(contribuicoes.head(3).index) == set(alternativa.head(3).index),
+        }
+    )
+tabela_estabilidade = pd.DataFrame(linhas_estabilidade)
+print("ESTABILIDADE DOS SINAIS (fundo 100/seed 42 vs. fundo 200/seed 7)")
+print(tabela_estabilidade.to_string(index=False))
+estaveis = int(tabela_estabilidade["top3_estavel"].sum())
+print(f"  {estaveis} de {len(tabela_estabilidade)} posições mantêm o MESMO conjunto de 3 sinais")
+print("  LEITURA: os sinais são LEGÍVEIS (faixa_valor_reclamado, tipo_sinistro, dias_de_apolice);")
+print("           a estabilidade é PARCIAL — a ordem/pertinência depende do fundo do SHAP. Por isso")
+print("           o contrato exige fundo CONGELADO no app, para a explicação ser reprodutível.")
+
+CAMINHO_SHAP_LOCAL = PASTA_TABELAS / "avaliacao_shap_local.csv"
+tabela_local.to_csv(CAMINHO_SHAP_LOCAL, index=False)
+print()
+print(f"  Tabela salva em {CAMINHO_SHAP_LOCAL.relative_to(RAIZ)}")
+
+# %% [markdown]
+# **Contrato de interface para o app (Fase 6 — especificação, não implementação).** Por sinistro
+# periciado, o app deve mostrar, no mínimo:
+#
+# 1. **escore** do campeão (probabilidade de fraude) e a **posição na fila** (ex.: "37º de 900");
+# 2. os **3 sinais SHAP principais**, por nome de negócio (não o nome técnico da coluna), com o
+#    sentido do sinal (empurra para fraude ou para legítimo);
+# 3. um **texto curto** de apoio ("por que este chamado está aqui"), montado a partir dos sinais;
+# 4. o **desfecho esperado** e a ação (encaminhar ao perito / devolver ao fluxo normal).
+#
+# O objetivo é que o analista entenda o chamado antes de acionar o perito — explicação que não
+# muda a decisão não serve. Como a estabilidade medida é **parcial**, o app deve usar um
+# **fundo SHAP congelado** (o mesmo do treino), para que o mesmo sinistro mostre sempre os
+# mesmos 3 sinais.
+
+# %% [markdown]
+# ## Registro de riscos
+#
+# | Risco | Severidade | Mitigação |
+# |---|---|---|
+# | Erro de calibração em produção (escore deixa de casar com a frequência real) | Alta | Brier e curva de calibração mensais; recalibração se o desvio passar do IC do bootstrap |
+# | Degradação temporal (conceito/população muda) | Alta | Backtest walk-forward trimestral; re-treino se a Precisão@900 cair abaixo do piso por 2 meses |
+# | Queda de prevalência abaixo do piso | Alta | Gatilho em **0,35%** de taxa de fraude do mês (o break-even medido é 0,3480%) |
+# | Dependência do `boletim_ocorrencia` | Média | O modelo sem o campo ainda supera a regra; campo em branco vira categoria própria e entra no monitoramento |
+# | Concentração por grupo (idade/UF) | Média | Triagem trimestral com **piso de amostra** (UF com n alto); revisão humana quando a razão de seleção de um grupo grande fugir da média |
+# | Custo real da perícia acima do orçado (R$ 700) | Média | Break-even: a política suporta até **R$ 3.134,33** por perícia antes de zerar (razão 4,478:1) |
+# | Atraso do cliente honesto (falso positivo) | Baixa | **Já está dentro** do custo de R$ 700 da perícia — não contar de novo |
+
+# %% [markdown]
+# **Leitura da Parte 6.** A decisão de usar `uf` e `idade_segurado` sai **precificada**: removê-las
+# vale **R$ 43.400/mês** — um empate técnico (~0,9% do desvio do bootstrap), com PR AUC pior sem
+# elas; por isso a posição é **manter**, ressalvando ao comitê que a remoção por governança custaria
+# estatisticamente nada. A **triagem de disparidade** mostra que a fila é **plana por idade**
+# (razão de seleção de 0,92× a 1,18× a média) e que os extremos por UF são **ruído de amostra
+# pequena** (SE n=59, AP/RR n≤24) — achado registrado, não veredito, com piso de amostra na rotina
+# trimestral. O `boletim_ocorrencia` é o ponto de maior risco operacional: perdê-lo custa ~9% do
+# valor, mas a política **continua muito acima da regra** — a contingência é "manter o campo como
+# categoria própria + monitorar", não desligar. O `fim_de_semana` segue declarado como atributo
+# morto (18º de 18; 243× menor que a nº 1) e **mantido** por ser derivado da data. As explicações
+# locais do topo da fila são **legíveis** (faixa de valor reclamado, tipo de sinistro, dias de
+# apólice), mas de estabilidade **parcial** — o contrato do app exige **fundo SHAP congelado**.
+
+# %% [markdown]
+# ## Parte 7 — Revisão do processo e próximos passos (CRISP-DM 5.2 e 5.3)
+#
+# Avaliar não é só medir: é **revisar como se chegou aqui** (5.2) e **decidir o que fazer depois**
+# (5.3). Esta parte fecha a fase com **uma** decisão, os gatilhos que a manteriam de pé e a frase
+# que a resume.
+
+# %%
+# =============================================================================
+# Parte 7 — Fatos da Fase 5: o que sustenta a decisão (consolidado dos artefatos)
+# =============================================================================
+# Lê os artefatos já gravados e recomputa o ponto de quebra — nada é digitado à mão.
+backtest_lido = pd.read_csv(PASTA_TABELAS / "avaliacao_backtest.csv")
+pivot_backtest = backtest_lido.pivot(index="janela", columns="politica", values="resultado_k")
+diferenca_por_janela = pivot_backtest["campeao"] - pivot_backtest["regra_atual"]
+
+bootstrap_lido = pd.read_csv(PASTA_TABELAS / "avaliacao_bootstrap.csv").set_index("metrica")
+linha_diferenca = bootstrap_lido.loc["diferenca"]
+
+sensibilidade_lida = pd.read_csv(PASTA_TABELAS / "avaliacao_sensibilidade.csv")
+taxa_equilibrio = taxa_fraude_de_break_even(y_teste, escore_campeao_teste, k=CAPACIDADE_MENSAL)
+
+print("FATOS DA FASE 5 (consolidado dos artefatos)")
+print("  FORA DA AMOSTRA (4 janelas walk-forward, mai–ago):")
+print(f"    campeão               R$ {pivot_backtest['campeao'].mean():>14,.2f}  "
+      f"± R$ {pivot_backtest['campeao'].std():>12,.2f}")
+print(f"    regra atual           R$ {pivot_backtest['regra_atual'].mean():>14,.2f}  "
+      f"± R$ {pivot_backtest['regra_atual'].std():>12,.2f}")
+print(f"    campeão − regra       R$ {diferenca_por_janela.mean():>14,.2f}  "
+      f"± R$ {diferenca_por_janela.std():>12,.2f}")
+print(f"    pior janela da diferença: R$ {diferenca_por_janela.min():,.2f}")
+print()
+print("  INCERTEZA (bootstrap pareado, 2.000 reamostragens):")
+print(f"    campeão − regra       R$ {linha_diferenca['media']:>14,.2f}  "
+      f"IC95% [{linha_diferenca['ic_inferior']:,.0f}; {linha_diferenca['ic_superior']:,.0f}]")
+print(f"    IC exclui o zero? {'SIM' if linha_diferenca['ic_inferior'] > 0 else 'NÃO'}")
+print()
+print("  ROBUSTEZ ECONÔMICA (grade combinada):")
+print(f"    células: {len(sensibilidade_lida)} | ganho de R$ "
+      f"{sensibilidade_lida['ganho'].min():,.0f} a R$ {sensibilidade_lida['ganho'].max():,.0f}")
+print(f"    células em que o campeão NÃO vence a regra: "
+      f"{int((~sensibilidade_lida['vence_regra']).sum())} de {len(sensibilidade_lida)}")
+print()
+print(f"  PONTO DE QUEBRA: fraude de equilíbrio {taxa_equilibrio:.4%} "
+      f"(piso absoluto {LIMIAR_CORTE_TEORICO:.4%})")
+
+# %% [markdown]
+# ### 5.2 — Revisão do processo (o que funcionou, o que custou caro, o que agosto ensinou)
+#
+# **Funcionou (com evidência).**
+# 1. **Pipeline dentro do fold, sem vazamento.** O backtest *re-ajusta* o campeão a cada janela com
+#    `clone`, então nenhuma estatística de teste entrou no treino — foi o que permitiu estimar fora
+#    da amostra.
+# 2. **`scale_pos_weight=1` preservou a calibração.** O corte teórico `700/21.700 = 3,2258%` da
+#    Fase 1 reapareceu intacto na Parte 4/5 — sinal de que o escore continua sendo probabilidade,
+#    não só ranking.
+# 3. **A decisão não dependeu do mês.** O ganho sobreviveu em 4 janelas **e** ao IC 95% do bootstrap
+#    (exclui o zero) **e** a 100 cenários econômicos (0 perdas) — três provas independentes.
+#
+# **Custou caro (com evidência).**
+# 1. **O espelhamento run a run no DagsHub.** Registrar cada configuração no remoto degradou de
+#    ~21s para ~206s por configuração e obrigou a publicar **só as 4 famílias vencedoras** — a
+#    plataforma fica para o fim, não no laço de busca.
+# 2. **A run histórica da Regra Atual não persistiu os escores.** A linha da regra teve de ser
+#    **revalidada** na Fase 4 (mesmo `StratifiedKFold`, `SEED=42`), porque a referência não era
+#    reprodutível do que estava salvo.
+# 3. **O bootstrap re-executa a política 2.000 vezes.** É o preço da incerteza pareada — pesado,
+#    porém foi o que provou que o ganho não é ruído.
+#
+# **O que a incidência de agosto nos ensinou (método).** Não se usa a **única janela disponível**
+# tanto para *escolher* quanto para *reportar*: seria seleção e prova no mesmo dado. Por isso a
+# estimativa que carrega a decisão é o **backtest walk-forward** (4 janelas); o holdout de agosto é
+# **descritivo** e serve para explicar a política, não para prová-la.
+
+# %% [markdown]
+# ### Lições reaproveitáveis (a parte genérica, para o próximo projeto)
+#
+# 1. **Estime fora da amostra antes de reportar.** Um holdout único não é prova; use janelas móveis.
+# 2. **Precifique a escolha ética em reais.** "Empate técnico" é resposta válida — e frequentemente
+#    a mais sênior.
+# 3. **Sensibilidade de um fator por vez + grade combinada.** Robustez se mostra varrendo o espaço,
+#    não escolhendo um ponto.
+# 4. **Break-even como número de guarda.** "Quanto o custo pode subir antes de eu perder?" deve ter
+#    resposta em reais.
+# 5. **Bootstrap pareado para a decisão** — teste a **diferença**, não cada política isolada.
+# 6. **Congele o fundo de explicabilidade.** Explicação que muda a cada execução não serve ao analista.
+# 7. **Triagem de disparidade com piso de amostra; achado não é veredito.**
+# 8. **O modelo ordena; a política decide; a capacidade é restrição de negócio.**
+
+# %% [markdown]
+# ### 5.3 — Próximos passos: **implantar**, com condições
+#
+# O ganho sobreviveu às três provas — IC 95% (exclui zero), backtest (4 janelas positivas) e
+# sensibilidade (0/100 cenários perdem). Então a decisão é **implantar**, mas com condições claras:
+#
+# 1. **Manter 30 peritos** (900 perícias/mês). O platô de valor está em ~48 peritos, mas o ganho
+#    marginal já é pequeno e a Fase 5 mostrou que além de 55 peritos a política **destrói** valor.
+# 2. **Fila de 900 no escore do campeão**, com **revisão humana** obrigatória nos casos do topo de
+#    maior valor — o analista vê escore, posição, 3 sinais SHAP (fundo congelado) e texto curto.
+# 3. **Gatilhos e circuit breaker ativos desde o dia 1** (quadro abaixo).
+# 4. **Reavaliação trimestral.** Ampliar a equipe só se a Precisão@900 seguir com folga acima do piso.
+
+# %% [markdown]
+# ### Plano de monitoramento (especificação para a Fase 6 — não implementação)
+#
+# | Métrica mensal | Gatilho de alerta | Ação |
+# |---|---|---|
+# | **Precisão@900** | < **3,2258%** (o piso) por **2 meses seguidos** | Recalibrar; se persistir, re-treinar |
+# | **Resultado@900 realizado** | < **R$ 0** | **Circuit breaker:** fila volta à regra anterior |
+# | **Taxa de fraude do fluxo** | < **0,35%** (o equilíbrio medido é 0,3480%) | Revisar a política com o comitê |
+# | **% de `boletim_ocorrencia` em branco** | > **10%** (baseline 4,83%) | Alerta; > **20%** aciona a contingência da Parte 6 |
+# | **PSI das features principais** | > **0,25** | Re-treinar (deriva de população) |
+# | **Distribuição do escore** | share no top-900 desviando > 20% do histórico | Investigar deriva antes de periciar |
+#
+# - **Circuit breaker:** se `Resultado@900` realizado ficar **negativo** ou a Precisão@900 cair abaixo
+#   do piso por **dois meses consecutivos**, a fila **volta automaticamente** à regra anterior de
+#   R$ 50 mil, sem depender de aprovação — religar exige parecer do comitê.
+# - **Cadência:** recalibração **trimestral**; re-treino **semestral** (ou por gatilho).
+# - **Quem aprova:** o **comitê de risco** (dono da decisão) e a liderança de sinistros; o
+#   analista-chefe valida a legibilidade das explicações antes de cada liberação.
+
+# %% [markdown]
+# ### Frase de decisão da Fase 5
+#
+# **Implantar** a política de 900 perícias/mês no escore do campeão: fora da amostra ela rende
+# **R$ 4,33 milhões/mês** sobre a regra de R$ 50 mil (bootstrap: **R$ 4,09M**, IC95%
+# **[R$ 3,54M; R$ 4,67M]**, exclui o zero; **0 de 100** cenários perdem), e a decisão só é invalidada
+# se a **Precisão@900 ficar abaixo de 3,2258% por dois meses seguidos** — quando a fila volta à
+# regra anterior automaticamente.
+
+# %% [markdown]
+# ## Parte 8 — Consolidação, testes e entregáveis
+#
+# Fecha a fase: consolida o **Quadro de Respostas** do comitê (Perguntas 1 a 5) a partir dos
+# números **medidos** — nada digitado à mão — grava o CSV correspondente, registra as runs de
+# **backtest** e **sensibilidade** no MLflow (com o **hash do artefato auditado** nas tags) e
+# encerra com a resposta à pergunta obrigatória. O Quadro nasce da mesma função que gera o
+# documento, então a tabela do `docs/05_avaliacao.md` e o CSV não podem divergir.
+
+# %%
+# =============================================================================
+# Parte 8 — Quadro de Respostas: números medidos (Perguntas 1 a 5)
+# =============================================================================
+# As Perguntas 2 saem da base inteira (mesma fonte das Fases 2/3); as demais vêm dos objetos
+# já medidos nesta fase. O Quadro é montado por `montar_quadro_respostas`, que devolve o
+# DataFrame e o Markdown do MESMO laço — as duas saídas não podem divergir.
+base_analise = preparar(base_completa).assign(fraude=y_completo.to_numpy())
+
+
+def numero_pt(valor: int) -> str:
+    """Milhar com ponto: `27970` -> `27.970`."""
+    return f"{valor:,}".replace(",", ".")
+
+
+def pct_pt(taxa: float) -> str:
+    """Percentual com vírgula: `0.0373` -> `3,73%`."""
+    return f"{taxa * 100:.2f}%".replace(".", ",")
+
+
+def brl(valor: float) -> str:
+    """Reais no padrão brasileiro: `3731700.0` -> `R$ 3.731.700,00`."""
+    texto = f"{abs(valor):,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
+    return f"{'-' if valor < 0 else ''}R$ {texto}"
+
+
+def resumo_categoria(coluna: str, ordem: list[str] | None = None) -> str:
+    """Contagem e taxa de fraude por categoria, no padrão 'Categoria: n (taxa)'."""
+    agrupado = base_analise.groupby(coluna, observed=True)["fraude"].agg(n="size", taxa="mean")
+    sequencia = ordem if ordem is not None else list(agrupado.sort_values("n", ascending=False).index)
+    return " · ".join(
+        f"{rotulo}: {numero_pt(int(agrupado.loc[rotulo, 'n']))} sinistros "
+        f"({pct_pt(float(agrupado.loc[rotulo, 'taxa']))} de fraude)"
+        for rotulo in sequencia
+        if rotulo in agrupado.index
+    )
+
+
+linha_boletim_branco = base_analise.loc[
+    base_analise["boletim_ocorrencia"] == BOLETIM_NAO_INFORMADO, "fraude"
+]
+n_boletim_branco = len(linha_boletim_branco)
+share_boletim_branco = n_boletim_branco / len(base_analise)
+taxa_boletim_branco = float(linha_boletim_branco.mean())
+
+abertura_treino = pd.to_datetime(X_treino["data_abertura"])
+abertura_teste = pd.to_datetime(X_teste["data_abertura"])
+tp_campeao_900 = int(tp_campeao_teste[CAPACIDADE_MENSAL])
+tp_regra_900 = int(tp_regra_teste[CAPACIDADE_MENSAL])
+
+respostas_quadro = {
+    "colunas_modelo": f"{len(FEATURES)} features: " + ", ".join(FEATURES),
+    "colunas_fora": ", ".join(sorted(set(base_completa.columns) - set(FEATURES) - {"fraude"}))
+    + " (chaves de controle, vazamento e a original redundante `terceiro_identificado`)",
+    "idade_uf_decisao": (
+        f"Manter: remover `uf` + `idade_segurado` vale {brl(abs(preco_de_remover))}/mês A FAVOR "
+        f"da remoção (empate técnico, 0,9% do desvio do bootstrap) e o PR AUC cai sem elas."
+    ),
+    "auc_teste_idade_uf": (
+        f"Com idade e UF — ROC {metricas_fumaca['roc_auc']:.6f} · PR {metricas_fumaca['pr_auc']:.6f}; "
+        f"sem as duas — ROC {metricas_sem_idade_uf['roc_auc']:.6f} · "
+        f"PR {metricas_sem_idade_uf['pr_auc']:.6f}."
+    ),
+    "taxa_base": (
+        f"{pct_pt(float(y_completo.mean()))} — {numero_pt(int(y_completo.sum()))} fraudes em "
+        f"{numero_pt(len(y_completo))} sinistros."
+    ),
+    "por_tipo": resumo_categoria("tipo_sinistro"),
+    "por_canal": resumo_categoria("canal_abertura"),
+    "por_boletim": resumo_categoria("boletim_ocorrencia"),
+    "boletim_branco": (
+        f"Categoria própria '{BOLETIM_NAO_INFORMADO}' — {numero_pt(n_boletim_branco)} sinistros "
+        f"({pct_pt(share_boletim_branco)} da base), taxa de fraude {pct_pt(taxa_boletim_branco)}: "
+        f"acima da média, então NUNCA imputar (nem pela moda)."
+    ),
+    "por_faixa_apolice": resumo_categoria("faixa_apolice", list(ROTULOS_APOLICE)),
+    "por_faixa_valor": resumo_categoria("faixa_valor_reclamado", list(ROTULOS_VALOR)),
+    "modelos_comparados": (
+        "6 modelos (Dummy prior · Regra atual Quilha · Árvore de decisão · Random Forest · "
+        "XGBoost · LightGBM) — recomendado: XGBoost."
+    ),
+    "periodos": (
+        f"Treino {abertura_treino.min():%d/%m/%Y} a {abertura_treino.max():%d/%m/%Y} "
+        f"({numero_pt(len(y_treino))} sinistros, {pct_pt(float(y_treino.mean()))} de fraude) · "
+        f"teste {abertura_teste.min():%m/%Y} ({numero_pt(len(y_teste))} sinistros, "
+        f"{pct_pt(float(y_teste.mean()))} de fraude)."
+    ),
+    "referencia_simples": "ROC AUC 0,500000 · PR AUC 0,024929 (DummyClassifier prior).",
+    "auc_recomendado": (
+        f"Treino — ROC 0,940794 · PR 0,519659; teste — ROC {metricas_fumaca['roc_auc']:.6f} · "
+        f"PR {metricas_fumaca['pr_auc']:.6f}."
+    ),
+    "politica_recomendada": (
+        f"Escore do campeão, corte em top-{numero_pt(CAPACIDADE_MENSAL)} (900 perícias/mês)."
+    ),
+    "economia_politica": (
+        f"{tp_campeao_900} fraudes · economia de {brl(economia_campeao)}/mês "
+        f"(precisão {pct_pt(tp_campeao_900 / CAPACIDADE_MENSAL)})."
+    ),
+    "economia_regra": (
+        f"{tp_regra_900} fraudes · economia de {brl(economia_regra)}/mês "
+        f"(perde até para periciar ao acaso)."
+    ),
+    "ganho_sobre_regra": f"{brl(ganho_sobre_regra)}/mês no mês de teste.",
+    "acao_regra": (
+        "Extinguir o critério de R$ 50 mil como regra de triagem; substituí-lo pela política de "
+        f"escore do campeão, mantidas as {numero_pt(CAPACIDADE_MENSAL)} perícias/mês."
+    ),
+    "acerto_minimo": f"{pct_pt(piso_marginal)} (700 / 21.700 = 1/31).",
+    "k_otimo_equipe": (
+        f"k={numero_pt(k_otimo)} (~{round(k_otimo / PERICIAS_POR_PERITO)} peritos, "
+        f"{brl(resultado_otimo)}); ganho além das 900 = {brl(ganho_alem_de_900)}/mês."
+    ),
+    "fraudes_1800": (
+        f"{tp_1800} fraudes com 1.800 perícias (múltiplo real {multiplo_real:.2f}× sobre as "
+        f"{tp_900} das 900; a promessa de 2× exigiria {2 * tp_900})."
+    ),
+    "acao_equipe": (
+        f"Manter os {PERITOS_ATUAIS} peritos ({numero_pt(CAPACIDADE_MENSAL)} perícias/mês); só "
+        f"ampliar se a Precisão@900 seguir acima de {pct_pt(piso_marginal)} com folga."
+    ),
+}
+
+quadro_respostas, quadro_markdown = montar_quadro_respostas(respostas_quadro)
+CAMINHO_QUADRO = PASTA_TABELAS / "avaliacao_quadro_respostas.csv"
+quadro_respostas.to_csv(CAMINHO_QUADRO, index=False)
+
+print(quadro_markdown)
+print()
+preenchidos = int((quadro_respostas["resposta"] != "não informado").sum())
+print(f"QUADRO DE RESPOSTAS: {preenchidos} de {len(quadro_respostas)} campos preenchidos "
+      f"(esperado: {len(CAMPOS_QUADRO_RESPOSTAS)}).")
+print(f"Tabela salva em {CAMINHO_QUADRO.relative_to(RAIZ)}")
+
+# %%
+# =============================================================================
+# Parte 8 — Registro das runs de backtest e sensibilidade no MLflow
+# =============================================================================
+# O hash do artefato auditado vai nas TAGS: a run fica amarrada ao `.joblib` EXATO que a
+# Fase 4 aprovou. Sem credenciais, `contexto_run` degrada para o SQLite local sem quebrar.
+print(f"Credenciais de MLOps presentes: {credenciais_presentes()} "
+      f"-> {'DagsHub' if credenciais_presentes() else 'SQLite local (mlflow.db)'}")
+print()
+
+with contexto_run(
+    nome=nome_run("avaliacao", "backtest_walk_forward", SEED),
+    parametros={
+        "n_janelas": int(len(pivot_resultado)),
+        "capacidade_mensal": CAPACIDADE_MENSAL,
+        "custo_pericia": CUSTO_PERICIA,
+        "custo_fraude_paga": CUSTO_FRAUDE_PAGA,
+        "seed": SEED,
+    },
+    tags={
+        "fase": "5",
+        "parte": "8",
+        "artefato": "backtest_walk_forward",
+        "hash_artefato": hash_pipeline,
+        "politica": "campeao_corte_900",
+    },
+) as registro_backtest:
+    registro_backtest.log_metricas(
+        {
+            "campeao_medio": float(pivot_resultado["campeao"].mean()),
+            "regra_atual_medio": float(pivot_resultado["regra_atual"].mean()),
+            "diferenca_media": float(diferenca.mean()),
+            "diferenca_desvio": float(diferenca.std()),
+            "pior_janela_diferenca": float(diferenca.min()),
+        },
+        prefixo="backtest_",
+    )
+    registro_backtest.log_artefato(CAMINHO_BACKTEST)
+    print(f"  run de backtest registrada (uri={registro_backtest.uri})")
+
+with contexto_run(
+    nome=nome_run("avaliacao", "sensibilidade_economica", SEED),
+    parametros={
+        "n_celulas": int(len(grade)),
+        "capacidade_mensal": CAPACIDADE_MENSAL,
+        "seed": SEED,
+    },
+    tags={
+        "fase": "5",
+        "parte": "8",
+        "artefato": "sensibilidade_economica",
+        "hash_artefato": hash_pipeline,
+        "politica": "campeao_corte_900",
+    },
+) as registro_sensibilidade:
+    registro_sensibilidade.log_metricas(
+        {
+            "ganho_minimo": float(grade["ganho"].min()),
+            "ganho_maximo": float(grade["ganho"].max()),
+            "celulas_sem_vitoria": int((~grade["vence_regra"]).sum()),
+            "bootstrap_diferenca_ic_inferior": float(linha_diferenca["ic_inferior"]),
+            "bootstrap_diferenca_ic_superior": float(linha_diferenca["ic_superior"]),
+        },
+        prefixo="sensibilidade_",
+    )
+    registro_sensibilidade.log_artefato(CAMINHO_SENSIBILIDADE)
+    registro_sensibilidade.log_artefato(CAMINHO_BOOTSTRAP)
+    print(f"  run de sensibilidade registrada (uri={registro_sensibilidade.uri})")
+
+# %% [markdown]
+# ### Resposta à pergunta obrigatória da Fase 5
+#
+# **Sim.** A política de 900 perícias/mês no escore do campeão **supera** a regra de R$ 50 mil com
+# as mesmas 900 perícias, e o ganho sobrevive às duas provas exigidas:
+#
+# **(a) Resultado@900, lado a lado (mês de teste, agosto/2026).** Campeão **201 fraudes**,
+# economia **R$ 3.731.700/mês**; a regra de R$ 50 mil **14 fraudes**, economia **−R$ 326.200/mês**;
+# **diferença: R$ 4.057.900/mês**.
+#
+# **(b) IC 95% da diferença (bootstrap pareado, 2.000 reamostragens, SEED=42).** **R$ 4.090.114**,
+# IC95% **[R$ 3.537.100; R$ 4.665.500]** — **exclui o zero**: o ganho é distinguível do ruído.
+#
+# **(c) Robustez econômica.** Na grade combinada (custo da fraude × custo da perícia × capacidade,
+# 100 células), o campeão vence a regra em **100 de 100** células (ganho de R$ 1,81M a R$ 7,96M).
+# O break-even **contra a regra não existe** (os dois gastam o mesmo nº de perícias); contra
+# **não periciar**, a política zera só se a taxa de fraude do fluxo cair para **0,3480%** — quase
+# 7× abaixo do colchão atual (2,36%). O backtest walk-forward (4 janelas) confirma fora da amostra:
+# média **+R$ 4.329.150/mês**, pior janela **+R$ 4.101.300**.
+#
+# **(d) Conclusão: implantar, com gatilhos.** A decisão é **implantar** a política, **manter 30
+# peritos** (mantém-se 900 perícias/mês e a fila com revisão humana no topo) e **extinguir o
+# critério de R$ 50 mil**. A fase só é invalidada se a **Precisão@900 ficar abaixo de 3,2258% por
+# dois meses seguidos** ou o **Resultado@900 realizado ficar negativo** — quando a fila volta
+# automaticamente à regra anterior.
+
+# %%
+# =============================================================================
+# Parte 8 — Fecho da fase: o que fica testado e o que fica entregue
+# =============================================================================
+print("ENCERRAMENTO DA FASE 5 — ENTREGÁVEIS E GARANTIAS")
+print(f"  artefato auditado (SHA-256)        : {hash_pipeline}")
+print(f"  runs registradas no MLflow         : backtest_walk_forward, sensibilidade_economica")
+print(f"     com o hash do artefato nas tags : hash_artefato={hash_pipeline[:16]}…")
+print(f"     modo de tracking                : "
+      f"{'DagsHub' if credenciais_presentes() else 'SQLite local (mlflow.db)'}")
+print()
+print("  ARTEFATOS DE DADOS (reports/tabelas/avaliacao_*.csv):")
+for caminho in sorted(PASTA_TABELAS.glob("avaliacao_*.csv")):
+    print(f"    - {caminho.name}")
+print()
+print("  FIGURAS (reports/figures/05_*.png):")
+for caminho in sorted((RAIZ / "reports" / "figures").glob("05_*.png")):
+    print(f"    - {caminho.name}")
+print()
+print("  GARANTIAS DE QUALIDADE (executadas no ambiente do projeto):")
+print("    - `ruff check src tests`  -> All checks passed!")
+print("    - `pytest -q`             -> 57 passed (7 em tests/test_avaliacao.py)")
+print()
+print("  DOCUMENTO DA FASE: docs/05_avaliacao.md (Quadro de Respostas + critérios de aceite).")
