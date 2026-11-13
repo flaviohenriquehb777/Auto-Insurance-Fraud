@@ -57,6 +57,7 @@ para apontar erros — é o que permite sair da linha de erro para a linha da fi
 
 from __future__ import annotations
 
+import functools
 import hashlib
 from pathlib import Path
 
@@ -499,16 +500,41 @@ def drift_das_features(
 # ---------------------------------------------------------------------------
 # Dados do app: artefato, lote de demonstração e fundo do SHAP
 # ---------------------------------------------------------------------------
+def _recurso(func):
+    """Cacheia um objeto (ex.: modelo). Usa st.cache_resource no app e
+    functools.lru_cache nos testes (onde não há sessão Streamlit)."""
+    try:
+        import streamlit as st
+
+        return st.cache_resource(func)
+    except Exception:
+        return functools.lru_cache(maxsize=1)(func)
+
+
+def _dados(func):
+    """Cacheia dados (ex.: DataFrames). Usa st.cache_data no app e
+    functools.lru_cache nos testes."""
+    try:
+        import streamlit as st
+
+        return st.cache_data(func)
+    except Exception:
+        return functools.lru_cache(maxsize=1)(func)
+
+
+@_recurso
 def carregar_modelo(caminho: Path | str = CAMINHO_PIPELINE):
     """Carrega o artefato auditado. O app nunca treina — só usa."""
     return carregar_pipeline(caminho)
 
 
+@_dados
 def carregar_treino_e_teste() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Treino e teste crus, pela mesma divisão temporal da Fase 3/4."""
     return dividir_temporal(carregar_base_crua(), data_corte=DATA_CORTE)
 
 
+@_dados
 def amostra_de_fundo(n: int = 100, semente: int = SEED) -> pd.DataFrame:
     """Amostra do treino que serve de referência ao SHAP (100 linhas bastam)."""
     treino, _ = carregar_treino_e_teste()
