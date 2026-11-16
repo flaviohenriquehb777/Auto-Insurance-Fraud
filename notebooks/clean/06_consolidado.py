@@ -124,6 +124,7 @@ from quilha.modelagem import (
     separar_entrada_alvo,
 )
 from quilha.monitoramento import alertas_imputacao, resumo_imputacoes
+from quilha.normalizacao import normalizar
 from quilha.pipeline import CAMINHO_PIPELINE, carregar_pipeline, construir_pipeline
 from quilha.preparacao import (
     BOLETIM_NAO_INFORMADO,
@@ -618,18 +619,30 @@ print(f"  MENSAGEM PERMANENTE DO APP: {MENSAGEM_PERMANENTE}")
 
 # %%
 # =============================================================================
-# 6 · Contrato na fronteira — um payload inválido NÃO chega ao modelo
+# 6 · Contrato na fronteira — representação é normalizada; o resto é recusado
 # =============================================================================
 linha_valida = teste_cru.iloc[[0]][list(CAMPOS_ABERTURA)].reset_index(drop=True)
+
+# (a) Representação pt-BR (melhoria B): "21.700,00" é o **mesmo** número de 21700.0,
+#     então o normalizador reescreve e relata — não é erro, é outra forma de escrever.
+com_milhar = linha_valida.copy()
+com_milhar.loc[:, "valor_reclamado"] = "21.700,00"
+lote_b, relatorio_b = normalizar(com_milhar)
+
+# (b) Significado: "abc" não é número em representação nenhuma — continua recusado.
 payload_ruim = linha_valida.copy()
-payload_ruim.loc[:, "valor_reclamado"] = "21.700,00"
+payload_ruim.loc[:, "valor_reclamado"] = "abc"
 
 erros_ruim = validar_payload(payload_ruim)
 erros_bom = validar_payload(linha_valida)
 
 print("6 · CONTRATO DE DADOS NA FRONTEIRA (camada 2 da vírgula)")
 print(f"  payload válido  -> {len(erros_bom)} erro(s) (esperado: 0)")
-print(f"  payload com '21.700,00' em valor_reclamado -> {len(erros_ruim)} erro(s):")
+print(
+    f"  payload com '21.700,00' em valor_reclamado -> normalizado pela melhoria B: "
+    f"{len(relatorio_b)} reescrita(s), {len(validar_payload(lote_b))} erro(s)"
+)
+print(f"  payload com 'abc' em valor_reclamado -> {len(erros_ruim)} erro(s):")
 for erro in erros_ruim:
     print(f"    {erro}")
 print()

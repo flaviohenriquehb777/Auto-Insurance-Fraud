@@ -9,6 +9,8 @@ O que esta suíte protege, na ordem em que importa para o negócio:
 3. **A linguagem.** O semáforo é de prioridade e nenhum rótulo acusa ninguém.
 4. **O número.** O painel de valor bate com a Fase 5 e o artefato implantado reproduz o
    mês auditado (é a prova de que o app lê o `.joblib` certo).
+5. **A escolha.** O perito escolhe o sinistro a detalhar; a fila é a fonte dessa escolha —
+   a mesma linha do lote que ele viu na tela de fila.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from quilha.app import (
     carregar_modelo,
     carregar_treino_e_teste,
     drift_das_features,
+    escolher_da_fila,
     faixa_prioridade,
     formatar_reais,
     hash_do_artefato,
@@ -42,6 +45,7 @@ from quilha.app import (
     posicao_na_fila,
     psi,
     resumo_fila,
+    rotulos_da_fila,
     saude_do_modelo,
     valor_esperado,
 )
@@ -96,7 +100,7 @@ def lote() -> pd.DataFrame:
 # 1. A porta: contrato antes do modelo
 # ---------------------------------------------------------------------------
 def test_payload_invalido_e_recusado_antes_de_chegar_ao_modelo(lote: pd.DataFrame) -> None:
-    lote.loc[2, "valor_reclamado"] = "21.700,00"  # milhar pt-BR: não converte
+    lote.loc[2, "valor_reclamado"] = "abc"  # texto que não é número: não converte
 
     with pytest.raises(PayloadRecusado) as recusa:
         pontuar_lote(lote, _EstimadorProibido())
@@ -104,7 +108,7 @@ def test_payload_invalido_e_recusado_antes_de_chegar_ao_modelo(lote: pd.DataFram
     tabela = recusa.value.como_tabela()
     assert list(tabela["campo"]) == ["valor_reclamado"]
     assert tabela.loc[0, "linha"] == 2
-    assert tabela.loc[0, "valor_recebido"] == "21.700,00"
+    assert tabela.loc[0, "valor_recebido"] == "abc"
 
 
 def test_lote_vazio_de_erros_pontua_normalmente() -> None:
@@ -169,6 +173,45 @@ def test_posicao_na_fila_conta_quantos_escores_estao_a_frente() -> None:
     assert posicao_na_fila(0.95, escores) == 1
     assert posicao_na_fila(0.5, escores) == 2  # empate herda a primeira posição do grupo
     assert posicao_na_fila(0.05, escores) == 5
+
+
+def test_rotulos_da_fila_usam_o_id_quando_o_lote_o_traz() -> None:
+    lote = pd.DataFrame([SINISTRO_VALIDO] * 2)
+    lote["id_sinistro"] = ["S-1", "S-2"]
+    fila = montar_fila(lote, _EstimadorFixo([0.9, 0.1]), k=2)
+
+    rotulos = rotulos_da_fila(fila)
+
+    assert rotulos[0] == "#1 · S-1 · escore 0.9000"
+    assert rotulos[1] == "#2 · S-2 · escore 0.1000"
+
+
+def test_rotulos_da_fila_caem_para_a_linha_do_lote_sem_id() -> None:
+    fila = montar_fila(pd.DataFrame([SINISTRO_VALIDO] * 2), _EstimadorFixo([0.9, 0.1]), k=2)
+
+    rotulos = rotulos_da_fila(fila)
+
+    assert "linha 0" in rotulos[0]  # o escore 0,9 veio da linha 0 do lote
+    assert "linha 1" in rotulos[1]
+
+
+def test_escolher_da_fila_devolve_a_linha_crua_do_sinistro_escolhido() -> None:
+    lote = pd.DataFrame([SINISTRO_VALIDO] * 3)
+    lote["id_sinistro"] = ["A", "B", "C"]
+    # escore por linha: 0,1 · 0,9 · 0,5 → a fila fica B · C · A
+    fila = montar_fila(lote, _EstimadorFixo([0.1, 0.9, 0.5]), k=3)
+
+    assert escolher_da_fila(lote, fila, indice=0).loc[0, "id_sinistro"] == "B"
+    assert escolher_da_fila(lote, fila, indice=1).loc[0, "id_sinistro"] == "C"
+    assert escolher_da_fila(lote, fila, indice=2).loc[0, "id_sinistro"] == "A"
+
+
+def test_escolher_da_fila_vazia_ou_fora_da_faixa_devolve_none() -> None:
+    lote = pd.DataFrame([SINISTRO_VALIDO])
+    fila = montar_fila(lote, _EstimadorFixo([0.9]), k=1)
+
+    assert escolher_da_fila(lote, fila, indice=5) is None
+    assert escolher_da_fila(lote, pd.DataFrame(), indice=0) is None
 
 
 def test_avaliar_fila_conta_as_fraudes_dentro_do_corte() -> None:

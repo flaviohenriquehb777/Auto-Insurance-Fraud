@@ -2,9 +2,9 @@
 
 Camada 2 (contrato) e camada 3 (alarme no silêncio) da "falha silenciosa da
 vírgula". O objetivo deste arquivo não é só provar que o contrato funciona hoje:
-é **travar** o comportamento. Se alguém afrouxar `preparacao._numero` para aceitar
-`"21.700,00"`, ou passar a imputar em vez de recusar na fronteira, o CI fica
-vermelho — que é exatamente a hora em que se quer descobrir isso.
+é **travar** o comportamento. Se alguém voltar a recusar `"21.700,00"` (milhar
+pt-BR inequívoco, aceito pela melhoria B) ou passar a imputar em vez de recusar na
+fronteira, o CI fica vermelho — que é exatamente a hora em que se quer descobrir isso.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ from quilha.contrato import (
     CAMPOS_HORA,
     CAMPOS_NUMERICOS,
     DOMINIOS_CATEGORICOS,
+    canonico_categorico,
+    canonico_data,
     validar_payload,
 )
 from quilha.dados import carregar_base_crua, dividir_temporal
@@ -85,13 +87,17 @@ def campeao():
 # ---------------------------------------------------------------------------
 # A bateria adversarial (o coração da Parte 1)
 # ---------------------------------------------------------------------------
-# Entrada em `_numero`, o que ele devolve hoje, se o CONTRATO aceita, e a lição.
+# Entrada em `_numero`, o que ele devolve, se o CONTRATO aceita, e a lição.
+# A melhoria B (spec 07) reverteu **em parte** a Fase 6: o milhar pt-BR com os DOIS
+# separadores passou a ser tratado. O número com um só ponto continua ambíguo.
 BATERIA_ADVERSARIAL: tuple[tuple[str | None, float | None, bool, str], ...] = (
-    ("8837,07", 8837.07, True, "formato pt-BR correto: aceito"),
+    ("8837,07", 8837.07, True, "formato pt-BR corrente: aceito"),
     ("8837.07", 8837.07, True, "formato com ponto também converte"),
-    ("21.700,00", None, False, "milhar pt-BR não é tratado — decisão do projeto"),
+    ("1.234,56", 1234.56, True, "milhar pt-BR (dois separadores): tratado — melhoria B1"),
+    ("21.700,00", 21700.0, True, "milhar pt-BR (dois separadores): tratado — melhoria B1"),
+    ("1.234.567,89", 1234567.89, True, "milhar pt-BR com dois grupos: tratado"),
     ("R$ 100,00", None, False, "texto com moeda não é número"),
-    ("1.234", 1.234, True, "lido como 1,234 — risco de 1.000× documentado"),
+    ("1.234", 1.234, True, "um só ponto: ambíguo, lido como 1,234 — reversão parcial e declarada"),
     ("", None, False, "vazio: o contrato não imputa na fronteira"),
     (None, None, False, "ausente: o contrato não imputa na fronteira"),
 )
@@ -231,10 +237,9 @@ def test_boletim_em_branco_e_aceito_e_vira_nao_informado(campeao):
 @pytest.mark.parametrize(
     "campo, valor",
     [
-        ("data_ocorrencia", "31/02/2026"),  # dia inexistente
+        ("data_ocorrencia", "31/02/2026"),  # dia inexistente no calendário
         ("data_ocorrencia", "ontem"),
-        ("data_ocorrencia", "18/07/2026"),  # dia/mês/ano: formato não explícito
-        ("data_ocorrencia", "03/04/2026"),  # ambíguo: o pandas leria 4 de março
+        ("data_ocorrencia", "2026-13-01"),  # mês 13: não é data
         ("data_abertura", ""),
         ("data_abertura", "13:53"),  # hora trocada de campo virava "hoje às 13:53"
     ],
@@ -256,11 +261,51 @@ def test_data_explicita_e_aceita(valor):
     assert validar_payload(_payload(data_ocorrencia=valor, data_abertura=valor)) == []
 
 
-def test_recusa_de_data_ensina_o_formato():
-    erro = validar_payload(_payload(data_abertura="18/07/2026"))[0]
+@pytest.mark.parametrize(
+    "entrada, iso_esperado",
+    [
+        ("18/07/2026", "2026-07-18"),  # inequívoca: dia 18 > 12
+        ("03/04/2026", "2026-04-03"),  # ambígua: a convenção pt-BR decide dia-primeiro
+        (" 2026-07-18 ", "2026-07-18"),  # ISO com espaço nas pontas: representação
+    ],
+)
+def test_data_pt_br_e_aceita_e_normalizada(entrada, iso_esperado):
+    """A melhoria B3 aceita `DD/MM/AAAA` — e o contrato fixa a data em ISO."""
+    assert validar_payload(_payload(data_ocorrencia=entrada)) == []
+    assert canonico_data(entrada) == iso_esperado
 
-    assert erro.valor_recebido == "18/07/2026"
-    assert "AAAA-MM-DD" in erro.motivo
+
+def test_recusa_de_data_ensina_o_formato():
+    erro = validar_payload(_payload(data_abertura="ontem"))[0]
+
+    assert erro.valor_recebido == "ontem"
+    assert "AAAA-MM-DD" in erro.motivo and "DD/MM/AAAA" in erro.motivo
+
+
+# ---------------------------------------------------------------------------
+# Representação categórica (melhoria B2) — caixa/espaço não é domínio novo
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "campo, entrada, canonico_esperado",
+    [
+        ("uf", " sp ", "SP"),
+        ("canal_abertura", "app", "App"),
+        ("tipo_sinistro", "COLISÃO", "Colisão"),
+        ("terceiro_identificado", "não se aplica", "Não se aplica"),
+    ],
+)
+def test_categorica_com_caixa_ou_espaco_e_aceita(campo, entrada, canonico_esperado):
+    """Caixa e espaço nas pontas são representação; o valor canônico é o do domínio."""
+    assert validar_payload(_payload(**{campo: entrada})) == []
+    assert canonico_categorico(campo, entrada) == canonico_esperado
+
+
+def test_representacao_nao_abre_a_porta_para_sinonimo_do_negocio():
+    """`"Telefone"` não é representação de `"Central 0800"`: segue recusado."""
+    erros = validar_payload(_payload(canal_abertura="Telefone"))
+
+    assert _campos(erros) == {"canal_abertura"}
+    assert "domínio" in erros[0].motivo
 
 
 @pytest.mark.parametrize(
@@ -307,14 +352,14 @@ def test_lote_com_uma_linha_ruim_aponta_a_linha():
         [
             dict(SINISTRO_VALIDO),
             {**SINISTRO_VALIDO, "uf": "SP"},
-            {**SINISTRO_VALIDO, "valor_reclamado": "21.700,00"},
+            {**SINISTRO_VALIDO, "idade_segurado": "abc"},
         ]
     )
     erros = validar_payload(lote)
 
     assert len(erros) == 1
     assert erros[0].linha == 2
-    assert erros[0].valor_recebido == "21.700,00"
+    assert erros[0].valor_recebido == "abc"
     assert "[linha 2]" in str(erros[0])
 
 

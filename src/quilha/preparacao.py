@@ -20,9 +20,9 @@ Saída
 Robustez para dado novo
 -----------------------
 Nenhuma entrada provoca exceção. `valor_reclamado` é aceito como `"8837,07"`
-(texto com vírgula), `"8837.07"` (texto com ponto) ou `8837.07` (float já
-convertido). Nulo em campo numérico é aceitável e esperado para dado sujo: quem
-trata é o `SimpleImputer`, nunca esta função.
+(texto com vírgula), `"8837.07"` (texto com ponto), `"1.234,56"` (milhar pt-BR
+inequívoco) ou `8837.07` (float já convertido). Nulo em campo numérico é aceitável
+e esperado para dado sujo: quem trata é o `SimpleImputer`, nunca esta função.
 
 Decisões de tratamento (cada uma sustentada por um achado da Fase 2)
 --------------------------------------------------------------------
@@ -123,15 +123,29 @@ def _texto(serie: pd.Series) -> pd.Series:
     return pd.Series(limpo.to_numpy(dtype=object, na_value=np.nan), index=serie.index, dtype=object)
 
 
+# Milhar pt-BR **inequívoco**: ponto de milhar **e** vírgula decimal ("1.234,56").
+# Um único ponto ("1.234") permanece ambíguo — pode ser 1,234 ou 1.234 — e continua
+# lido como o próprio número (decisão documentada na melhoria B do spec 07).
+PADRAO_MILHAR_PT_BR = r"-?\d{1,3}(\.\d{3})+,\d+"
+
+
 def _numero(serie: pd.Series) -> pd.Series:
-    """Número a partir de `"8837,07"`, `"8837.07"` ou `8837.07`; inválido vira `<NA>`.
+    """Número a partir de `"8837,07"`, `"8837.07"`, `"1.234,56"` ou `8837.07`; inválido vira `<NA>`.
+
+    Fonte **única** de conversão numérica do projeto: a preparação, o contrato e o
+    normalizador usam esta mesma função. Só o milhar pt-BR inequívoco (dois
+    separadores) tem o ponto de milhar desmontado; `"1.234"` (um só ponto) continua
+    lido como separador decimal.
 
     Sempre devolve `Float64` (nullable): a conversão final para inteiro acontece em
     `_inteiro`, para as colunas que são contagem.
     """
     if pd.api.types.is_bool_dtype(serie) or pd.api.types.is_numeric_dtype(serie):
         return pd.to_numeric(serie, errors="coerce").astype("Float64")
-    texto = serie.astype("string").str.strip().str.replace(",", ".", regex=False)
+    texto = serie.astype("string").str.strip()
+    milhar = texto.str.fullmatch(PADRAO_MILHAR_PT_BR).fillna(False)
+    texto = texto.mask(milhar, texto.str.replace(".", "", regex=False))
+    texto = texto.str.replace(",", ".", regex=False)
     return pd.to_numeric(texto, errors="coerce").astype("Float64")
 
 

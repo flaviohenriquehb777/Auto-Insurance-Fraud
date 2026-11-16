@@ -15,10 +15,18 @@ As três telas
 -------------
 1. **Fila do mês** — recebe o lote, passa pelo contrato (camada 2 da Parte 1), pontua,
    ordena por escore e corta em `k`. Exporta a fila em CSV para o gestor da perícia.
-2. **Sinistro individual** — escore, posição na fila, faixa de prioridade e os sinais
-   SHAP em linguagem de priorização (nunca "evidências de fraude").
+2. **Sinistro individual** — o perito **escolhe** qual sinistro da fila detalhar (pelo id ou
+   pela posição, inclusive clicando na linha da tela 1) e recebe escore, posição na fila, faixa
+   de prioridade e os sinais SHAP em linguagem de priorização (nunca "evidências de fraude").
+   A origem "Digitar um chamado" continua para o sinistro que ainda não está no lote.
 3. **Valor e governança** — o ganho em reais com o intervalo de confiança, o valor por
    sinistro, a saúde do modelo e os gatilhos de circuit breaker.
+
+Uma fonte só de lote
+--------------------
+As três telas leem **um único lote** — o mesmo CSV enviado na barra lateral. A fila, o sinistro
+individual, a saúde do modelo e o drift olham para a mesma população, o que deixa o perito
+clicar em um sinistro na fila e detalhá-lo na tela seguinte sem divergência de dados.
 
 Decisões de implantação travadas aqui (e levadas ao resumo da diretoria)
 -----------------------------------------------------------------------
@@ -48,6 +56,14 @@ equivalente, 17,9% dos sinistros eram fraude".
 **D4 — Capacidade proporcional ao lote.**
 `k = 900 × n_sinistros / 12.024` (`modelagem.calcular_k_proporcional`): a equipe pericia 900/mês,
 e um lote que não é um mês cheio não pode ser periciado como se fosse.
+
+**D5 — Normalização de representação, com relatório (melhoria B).**
+Toda entrada — o lote da barra lateral e o "Digitar um chamado" — passa por
+`quilha.normalizacao.normalizar` **antes** do contrato: milhar pt-BR (`"1.234,56"`), caixa/espaço
+na categórica (`" sp "` → `"SP"`) e data `DD/MM/AAAA` são reescritos para a forma canônica e
+**relatados na tela**. Só representação é aceita; significado, ambiguidade e domínio continuam
+recusados pelo contrato. É a diferença entre corrigir a **forma** de um valor e **inventar** o
+valor: sem o relatório, a normalização seria uma falha silenciosa com outro nome.
 
 Rastreabilidade
 ---------------
@@ -81,6 +97,7 @@ from quilha.modelagem import (
     calcular_k_proporcional,
 )
 from quilha.monitoramento import LIMIAR_IMPUTACAO_SUSPEITA, alertas_imputacao, resumo_imputacoes
+from quilha.normalizacao import normalizar
 from quilha.pipeline import CAMINHO_PIPELINE, carregar_pipeline
 from quilha.preparacao import FEATURES, preparar
 
@@ -128,6 +145,14 @@ COLUNAS_CONTEXTO_FILA: tuple[str, ...] = (
     "dias_de_apolice",
     "boletim_ocorrencia",
 )
+
+# A escolha do sinistro a detalhar mora na sessão (a linha 0-based no lote): a fila grava, a
+# tela do sinistro individual lê. É a ponte que permite clicar na fila e detalhar na tela 2.
+CHAVE_SELECAO = "sinistro_escolhido"
+
+# O relatório da normalização de representação (o que o lote trouxe em forma não canônica e
+# foi reescrito). Fica na sessão para a tela mostrá-lo sem recalcular a cada rerun.
+CHAVE_RELATORIO = "relatorio_normalizacao"
 
 # ---------------------------------------------------------------------------
 # Números auditados da política (Fase 5) — fonte única, com procedência declarada
@@ -247,6 +272,36 @@ def posicao_na_fila(escore: float, escores_do_lote: np.ndarray) -> int:
     return int(np.count_nonzero(escores_do_lote > escore)) + 1
 
 
+def rotulos_da_fila(fila: pd.DataFrame) -> list[str]:
+    """Rótulo de cada entrada da fila para o seletor da tela do sinistro individual.
+
+    Usa o `id_sinistro` quando o lote o traz (o caso do mês de teste) e cai para a linha do
+    lote quando não há id (um CSV sem essa coluna) — o perito nunca fica sem referência.
+    """
+    tem_id = "id_sinistro" in fila.columns
+    rotulos: list[str] = []
+    for _, linha in fila.iterrows():
+        if tem_id and isinstance(linha["id_sinistro"], str):
+            identificacao = str(linha["id_sinistro"])
+        else:
+            identificacao = f"linha {int(linha['linha_no_lote'])}"
+        rotulos.append(f"#{int(linha['posicao'])} · {identificacao} · escore {linha['escore']:.4f}")
+    return rotulos
+
+
+def escolher_da_fila(lote: pd.DataFrame, fila: pd.DataFrame, indice: int) -> pd.DataFrame | None:
+    """Linha **crua** do sinistro que ocupa a posição `indice` (0-based) da fila.
+
+    É a ponte entre as telas: a fila guarda `linha_no_lote`, e é por ela que a tela do sinistro
+    individual recupera o chamado **original** — o mesmo que o perito viu na fila. Devolve
+    `None` quando o índice não existe (fila vazia ou fora da faixa).
+    """
+    if fila.empty or not 0 <= indice < len(fila):
+        return None
+    linha_no_lote = int(fila.iloc[indice]["linha_no_lote"])
+    return lote.iloc[[linha_no_lote]].reset_index(drop=True)
+
+
 def montar_fila(df: pd.DataFrame, pipeline, k: int | None = None) -> pd.DataFrame:
     """Ordena o lote pelo escore e corta em `k`, devolvendo a fila de perícia.
 
@@ -293,15 +348,19 @@ def montar_fila(df: pd.DataFrame, pipeline, k: int | None = None) -> pd.DataFram
 
 
 def pontuar_lote(df: pd.DataFrame, pipeline, k: int | None = None) -> pd.DataFrame:
-    """Rota única de pontuação da tela de fila: **contrato primeiro**, escore depois.
+    """Rota única de pontuação da tela de fila: **normaliza, contrato, escore**.
 
-    Levanta `PayloadRecusado` se qualquer linha violar o contrato — e nesse caso **nada**
-    é pontuado (decisão D1).
+    A ordem é o que fecha a falha silenciosa: `normalizar` reescreve a **representação**
+    (`" sp "` → `"SP"`, `"1.234,56"` → `"1234.56"`, `"15/08/2026"` → ISO) para que a
+    categoria canônica chegue ao Pipeline; o **contrato** recusa o que não é representação
+    (decisão D1, `fail closed`) — e nesse caso **nada** é pontuado. `normalizar` é
+    idempotente: um lote já canônico atravessa sem mudança.
     """
-    erros = validar_payload(df)
+    lote, _ = normalizar(df)
+    erros = validar_payload(lote)
     if erros:
         raise PayloadRecusado(erros)
-    return montar_fila(df, pipeline, k=k)
+    return montar_fila(lote, pipeline, k=k)
 
 
 def avaliar_fila(fila: pd.DataFrame, gabarito: pd.Series | np.ndarray) -> dict[str, float | int]:
@@ -577,20 +636,54 @@ def main() -> None:  # pragma: no cover - a tela é exercitada à mão e no smok
         return
 
     lote = _carregar_lote(st)
+    _mostrar_relatorio(st)
     if tela == "Fila do mês":
         _tela_fila(st, lote)
     else:
-        _tela_individual(st, lote, _carregar_lote(st, chave="lote_individual"))
+        _tela_individual(st, lote)
 
 
-def _carregar_lote(st, chave: str = "lote_fila") -> pd.DataFrame:  # pragma: no cover
-    """Lote de entrada: o CSV enviado ou o mês de teste como demonstração."""
-    arquivo = st.sidebar.file_uploader("Lote de sinistros abertos (CSV)", type=["csv"], key=chave)
+def _carregar_lote(st) -> pd.DataFrame:  # pragma: no cover
+    """Lote de entrada **já normalizado**: o CSV enviado ou o mês de teste.
+
+    **Uma fonte só:** o mesmo lote alimenta a fila, o sinistro individual, a saúde do modelo e
+    o drift. A `key` fixa faz o arquivo sobreviver à troca de tela.
+
+    A normalização de **representação** (melhoria B) acontece aqui, na fronteira: o lote
+    reescrito é o que segue para todas as telas, e o relatório do que mudou vai para a
+    sessão, exibido por `_mostrar_relatorio`.
+    """
+    arquivo = st.sidebar.file_uploader("Lote de sinistros abertos (CSV)", type=["csv"], key="lote")
     if arquivo is not None:
-        return pd.read_csv(arquivo, dtype=str)
-    st.sidebar.caption("Sem arquivo: usando o mês de teste (agosto/2026) como demonstração.")
-    _, teste = carregar_treino_e_teste()
-    return teste
+        cru = pd.read_csv(arquivo, dtype=str)
+    else:
+        st.sidebar.caption("Sem arquivo: usando o mês de teste (agosto/2026) como demonstração.")
+        _, cru = carregar_treino_e_teste()
+
+    lote, relatorio = normalizar(cru)
+    st.session_state[CHAVE_RELATORIO] = relatorio
+    return lote
+
+
+def _mostrar_relatorio(st) -> None:  # pragma: no cover - depende da UI
+    """Exibe o que a normalização de representação reescreveu — nunca às escondidas.
+
+    Só aparece quando **houve** reescrita: um lote já canônico não gera ruído visual.
+    """
+    relatorio = st.session_state.get(CHAVE_RELATORIO)
+    if relatorio is None or relatorio.empty:
+        return
+
+    with st.expander(
+        f"Normalização de representação: {len(relatorio)} valor(es) reescrito(s)",
+        expanded=False,
+    ):
+        st.caption(
+            "Ajuste apenas de **representação** — mesmo valor, outra forma de escrever "
+            "(milhar pt-BR, caixa/espaço na categórica, data `DD/MM/AAAA`). O que não é "
+            "representação continua recusado pelo contrato na tela de fila."
+        )
+        st.dataframe(relatorio, width="stretch")
 
 
 def _tela_fila(st, lote: pd.DataFrame) -> None:  # pragma: no cover - depende da UI
@@ -632,7 +725,20 @@ def _tela_fila(st, lote: pd.DataFrame) -> None:  # pragma: no cover - depende da
         f"{len(lote)} sinistros no lote · {k} periciados · corte no escore "
         f"{fila['escore'].min():.6f}"
     )
-    st.dataframe(fila, width="stretch")
+    evento = st.dataframe(
+        fila,
+        width="stretch",
+        on_select="rerun",
+        selection_mode="single-row",
+        key="tabela_fila",
+    )
+    if not fila.empty and evento.selection.rows:
+        escolhida = int(evento.selection.rows[0])
+        st.session_state[CHAVE_SELECAO] = int(fila.iloc[escolhida]["linha_no_lote"])
+        st.info(
+            "Sinistro selecionado. Abra a tela **Sinistro individual** para ver o escore, a "
+            "posição e os sinais que o fizeram subir na fila."
+        )
     st.download_button(
         "Exportar fila (CSV)",
         fila.to_csv(index=False).encode("utf-8"),
@@ -640,8 +746,47 @@ def _tela_fila(st, lote: pd.DataFrame) -> None:  # pragma: no cover - depende da
     )
 
 
-def _tela_individual(st, lote: pd.DataFrame, lote_individual: pd.DataFrame) -> None:
-    """Tela 2 — sinistro individual: escore, posição, faixa, SHAP e governança."""
+def _selecionar_da_fila(st, lote: pd.DataFrame, pipeline):  # pragma: no cover - depende da UI
+    """Seletor do sinistro a detalhar: o perito escolhe uma entrada da fila.
+
+    Se um sinistro foi clicado na tela de fila, o seletor já abre nele (via `CHAVE_SELECAO`);
+    caso contrário, abre no topo da fila. Devolve a linha **crua** ou `None` (nada a detalhar).
+    """
+    try:
+        fila = pontuar_lote(lote, pipeline)
+    except PayloadRecusado as recusa:
+        st.error(
+            f"{recusa}. A fila não foi pontuada (fail closed) — corrija o lote na tela de fila."
+        )
+        st.dataframe(recusa.como_tabela(), width="stretch")
+        return None
+    if fila.empty:
+        st.info("Lote vazio: não há sinistro para detalhar.")
+        return None
+
+    rotulos = rotulos_da_fila(fila)
+    indice_padrao = 0
+    escolhido = st.session_state.get(CHAVE_SELECAO)
+    if escolhido is not None:
+        casam = np.nonzero(fila["linha_no_lote"].to_numpy() == int(escolhido))[0]
+        if len(casam):
+            indice_padrao = int(casam[0])
+
+    indice = st.selectbox(
+        "Sinistro da fila (digite para buscar)",
+        options=range(len(rotulos)),
+        index=indice_padrao,
+        format_func=lambda i: rotulos[i],
+    )
+    return escolher_da_fila(lote, fila, int(indice))
+
+
+def _tela_individual(st, lote: pd.DataFrame) -> None:
+    """Tela 2 — sinistro individual: escore, posição, faixa, SHAP e governança.
+
+    O perito **escolhe** o sinistro; o app nunca escolhe por ele. A origem "Da fila do mês"
+    reaproveita o lote da tela 1 — mesma população, mesma posição na fila.
+    """
     # pragma: no cover - depende da UI
     st.subheader("Sinistro individual")
     pipeline = carregar_modelo()
@@ -652,13 +797,29 @@ def _tela_individual(st, lote: pd.DataFrame, lote_individual: pd.DataFrame) -> N
 
     origem = st.radio("Origem do sinistro", ("Da fila do mês", "Digitar um chamado"))
     if origem == "Da fila do mês":
-        linha_crua = lote_individual.head(1).reset_index(drop=True)
+        linha_crua = _selecionar_da_fila(st, lote, pipeline)
     else:
         valores = {campo: st.text_input(campo, "") for campo in CAMPOS_ABERTURA}
         linha_crua = pd.DataFrame([valores])
 
+    if linha_crua is None:
+        return  # a própria seleção já explicou por que não há sinistro a detalhar
+
     if not st.button("Priorizar este sinistro"):
         return
+
+    # Mesma fronteira de toda entrada: normaliza a representação e **relata** — só então
+    # o contrato valida. Sem isto, um `" sp "` digitado à mão chegaria cru ao modelo e o
+    # escore mudaria sem aviso (a falha silenciosa que esta fase existe para matar).
+    linha_crua, relatorio_individual = normalizar(linha_crua)
+    if not relatorio_individual.empty:
+        st.caption(
+            "Normalização de representação aplicada: "
+            + "; ".join(
+                f"{registro.campo} {registro.de!r} → {registro.para!r}"
+                for registro in relatorio_individual.itertuples()
+            )
+        )
 
     erros = validar_payload(linha_crua)
     if erros:
@@ -728,7 +889,8 @@ def _tela_valor(st) -> None:  # pragma: no cover - depende da UI
 
     st.write("### Saúde do modelo")
     pipeline = carregar_modelo()
-    saude = saude_do_modelo(pipeline, _carregar_lote(st, chave="lote_saude"))
+    lote = _carregar_lote(st)  # uma fonte só: o mesmo lote da fila e do sinistro individual
+    saude = saude_do_modelo(pipeline, lote)
     st.write(f"Artefato: `{saude['caminho']}`")
     st.code(saude["hash"], language=None)
     st.write(f"Linhas avaliadas: {saude['n_linhas']}")
@@ -749,10 +911,7 @@ def _tela_valor(st) -> None:  # pragma: no cover - depende da UI
 
     st.write("### Deriva das features principais (PSI)")
     treino, _ = carregar_treino_e_teste()
-    st.dataframe(
-        drift_das_features(treino, _carregar_lote(st, chave="lote_drift")),
-        width="stretch",
-    )
+    st.dataframe(drift_das_features(treino, lote), width="stretch")
 
     st.write("### Gatilhos de monitoramento e circuit breaker")
     st.table(

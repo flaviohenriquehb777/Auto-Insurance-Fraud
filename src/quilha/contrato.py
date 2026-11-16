@@ -30,8 +30,8 @@ o domínio das categóricas, e a conversão numérica/data/hora. O minuto de
 `preparar`), então não é objeto do contrato — recusar por ele seria criar atrito
 sem proteger nada.
 
-Data: por que só `AAAA-MM-DD`
------------------------------
+Data: por que só `AAAA-MM-DD` (e, agora, `DD/MM/AAAA`)
+------------------------------------------------------
 `pd.to_datetime(..., format="mixed")` — o parser usado em `preparar` — aceita
 **qualquer** texto plausível e resolve o resto pelo calendário de hoje:
 
@@ -43,9 +43,22 @@ Data: por que só `AAAA-MM-DD`
 
 Um contrato que aceitasse esses textos entregaria ao modelo uma data errada com
 cara de data certa. Por isso a fronteira aceita **apenas** data explícita: texto
-ISO `AAAA-MM-DD` ou um objeto de data de verdade (`datetime.date`/`Timestamp`,
-que é o que um seletor de data do app devolve). Qualquer outra forma é recusada
-com a instrução do formato — e o dado **não** chega ao modelo.
+ISO `AAAA-MM-DD`, texto pt-BR `DD/MM/AAAA` — que a melhoria B adota com a
+convenção **dia-primeiro** (a origem é brasileira; a convenção é a intenção de
+quem digita) — ou um objeto de data de verdade (`datetime.date`/`Timestamp`, que
+é o que um seletor de data do app devolve). Datas inexistentes no calendário
+(`"31/02/2026"`) e textos que não são data (`"ontem"`, `"13:53"`) continuam
+recusados com a instrução do formato — e o dado **não** chega ao modelo.
+
+Representação x significado (melhoria B)
+----------------------------------------
+`canonico_categorico` e `canonico_data` definem a **representação canônica** de um
+valor: caixa e espaço nas categóricas, `DD/MM/AAAA` nas datas. Apenas
+**representação** é aceita; **significado, ambiguidade e domínio** continuam
+recusados (`"Telefone"` não é `"Central 0800"`; `"99:99"` não é hora). Quem
+reescreve o lote e **relata** cada reescrita é `quilha.normalizacao.normalizar`,
+chamado **antes** do contrato e **antes** do modelo — o contrato aceita a forma
+canônica, o normalizador é quem a produz e a reporta.
 
 O critério de número é o **mesmo** de `preparacao._numero` (importado de lá, não
 reescrito): uma única fonte de verdade para a vírgula decimal. Se alguém afrouxar
@@ -122,9 +135,13 @@ CAMPOS_CATEGORICOS: tuple[str, ...] = tuple(DOMINIOS_CATEGORICOS)
 # Formato exigido de `hora_ocorrencia` no app: dois dígitos, dois pontos, dois dígitos.
 REGEX_HORA = r"^\d{2}:\d{2}$"
 
-# Único formato de texto aceito para data (texto ISO). Objetos de data de verdade
+# Único formato de texto canônico para data (texto ISO). Objetos de data de verdade
 # (o que um seletor de data devolve) passam sem conversão de texto.
 FORMATO_DATA_CANONICO = "%Y-%m-%d"
+
+# Formato pt-BR aceito como **representação** da mesma data (melhoria B). A convenção é
+# dia-primeiro: a origem é brasileira e é isso que quem digita quer dizer.
+FORMATO_DATA_PT_BR = "%d/%m/%Y"
 
 
 @dataclass(frozen=True)
@@ -179,6 +196,50 @@ def _como_dataframe(payload) -> pd.DataFrame:
     )
 
 
+# ---------------------------------------------------------------------------
+# Representação canônica de um valor (melhoria B) — o que o contrato aceita
+# ---------------------------------------------------------------------------
+# Princípio: **representação → normaliza e reporta; significado, ambiguidade ou
+# domínio → recusa.** Estas duas funções definem a forma canônica; o módulo
+# `quilha.normalizacao` as usa para reescrever o lote e **relatar** cada mudança.
+def canonico_categorico(campo: str, valor) -> str:
+    """Valor categórico na forma canônica do domínio, ignorando caixa e espaço.
+
+    `" sp "` e `"SP"` devolvem `"SP"`; `"não se aplica"` devolve `"Não se aplica"`.
+    Um valor que **não** casa com o domínio volta como veio (só sem espaços nas
+    pontas) — quem recusa, se for o caso, é `_erros_categoricos`. Não há tabela de
+    sinônimos: `"Telefone"` continua não sendo `"Central 0800"`.
+    """
+    if _vazio(valor):
+        return ""
+    texto = str(valor).strip()
+    for permitido in DOMINIOS_CATEGORICOS[campo]:
+        if permitido and permitido.casefold() == texto.casefold():
+            return permitido
+    return texto
+
+
+def canonico_data(valor) -> str | None:
+    """Data em ISO (`AAAA-MM-DD`), aceitando `DD/MM/AAAA` como representação pt-BR.
+
+    Devolve a data canônica; `None` quando o valor não é uma data representável
+    (texto que não é data, dia inexistente no calendário, hora trocada de campo).
+    Um objeto de data de verdade volta como texto ISO.
+    """
+    if isinstance(valor, dt.date | dt.datetime | pd.Timestamp):
+        return None if pd.isna(valor) else pd.Timestamp(valor).strftime(FORMATO_DATA_CANONICO)
+    if _vazio(valor):
+        return None
+    texto = str(valor).strip()
+    for formato in (FORMATO_DATA_CANONICO, FORMATO_DATA_PT_BR):
+        try:
+            data = pd.to_datetime(texto, format=formato, errors="raise")
+        except (TypeError, ValueError):
+            continue
+        return None if pd.isna(data) else data.strftime(FORMATO_DATA_CANONICO)
+    return None
+
+
 def _erros_numericos(campo: str, serie: pd.Series) -> list[ErroContrato]:
     """Recusa campo numérico vazio ou que não converte (mesmo critério de `_numero`)."""
     convertido = _numero(serie)
@@ -201,25 +262,12 @@ def _erros_numericos(campo: str, serie: pd.Series) -> list[ErroContrato]:
                 ErroContrato(
                     campo,
                     _como_texto(bruto),
-                    "não converte para número (formatos aceitos: '8837,07' ou '8837.07')",
+                    "não converte para número (formatos aceitos: '8837,07', '8837.07' "
+                    "ou '1.234,56')",
                     linha,
                 )
             )
     return erros
-
-
-def _data_valida(valor) -> bool:
-    """Objeto de data de verdade, ou texto exatamente no formato `AAAA-MM-DD`.
-
-    Nada de inferência: `format="mixed"` aceitaria `"13:53"` como *hoje às 13:53* e
-    `"03/04/2026"` como 4 de março. Aqui, ou o texto é ISO, ou é recusado.
-    """
-    if isinstance(valor, dt.date | dt.datetime | pd.Timestamp):
-        return not pd.isna(valor)
-    try:
-        return not pd.isna(pd.to_datetime(valor, format=FORMATO_DATA_CANONICO, errors="coerce"))
-    except (TypeError, ValueError):
-        return False
 
 
 def _hora_valida(valor) -> bool:
@@ -233,18 +281,18 @@ def _hora_valida(valor) -> bool:
 
 
 def _erros_datas(campo: str, serie: pd.Series) -> list[ErroContrato]:
-    """Recusa data vazia ou que não esteja em formato explícito (ver `_data_valida`)."""
+    """Recusa data vazia ou sem representação de data reconhecida (ver `canonico_data`)."""
     erros: list[ErroContrato] = []
     for linha, bruto in enumerate(serie.to_numpy(dtype=object)):
         if _vazio(bruto):
             erros.append(ErroContrato(campo, "(vazio)", "data vazia", linha))
-        elif not _data_valida(bruto):
+        elif canonico_data(bruto) is None:
             erros.append(
                 ErroContrato(
                     campo,
                     _como_texto(bruto),
-                    "não é uma data explícita (formato aceito: 'AAAA-MM-DD', "
-                    "por exemplo 2026-07-18)",
+                    "não é uma data explícita (formatos aceitos: 'AAAA-MM-DD', "
+                    "por exemplo 2026-07-18, ou 'DD/MM/AAAA', por exemplo 18/07/2026)",
                     linha,
                 )
             )
@@ -275,11 +323,15 @@ def _erros_horas(campo: str, serie: pd.Series) -> list[ErroContrato]:
 
 
 def _erros_categoricos(campo: str, serie: pd.Series) -> list[ErroContrato]:
-    """Recusa valor fora do domínio da coluna (categoria nova não é adivinhada)."""
+    """Recusa valor fora do domínio da coluna (categoria nova não é adivinhada).
+
+    A comparação é pela **forma canônica** (`canonico_categorico`): caixa e espaço nas
+    pontas são representação, não domínio novo — `" sp "` é `"SP"`.
+    """
     permitidos = DOMINIOS_CATEGORICOS[campo]
     erros: list[ErroContrato] = []
     for linha, bruto in enumerate(serie.to_numpy(dtype=object)):
-        texto = "" if _vazio(bruto) else str(bruto).strip()
+        texto = canonico_categorico(campo, bruto)
         if texto == "":
             if "" in permitidos:
                 continue  # boletim em branco: caso de negócio, vira "Não informado"
