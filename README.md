@@ -32,6 +32,7 @@
 - [Resultados-chave e apresentação](#resultados-chave-e-apresentacao)
 - [Tecnologias utilizadas](#tecnologias-utilizadas)
 - [Instalação e uso](#instalacao-e-uso)
+- [Uso do app: fila, escolha do sinistro e normalização](#uso-do-app-fila-escolha-do-sinistro-e-normalizacao)
 - [Publicação no GitHub Pages](#publicacao-no-github-pages)
 - [Licença](#licenca)
 - [Contato](#contato)
@@ -60,12 +61,13 @@ responsabilidade do perito.
 O fluxo de pontuação é:
 
 ```text
-Payload CSV → contrato de dados → preparo → imputação → XGBoost
+Payload CSV → normalização da representação → contrato de dados → preparo → imputação → XGBoost
             → ordenação por escore → corte proporcional em k → fila para revisão humana
 ```
 
 | Caminho | Responsabilidade |
 |---|---|
+| `src/quilha/normalizacao.py` | Reescreve a **representação** (milhar pt-BR, caixa/espaço, data `dd/mm/aaaa`) e **relata** cada mudança. Só representação; significado e domínio seguem para o contrato. |
 | `src/quilha/contrato.py` | Valida campos e recusa o lote inteiro quando há entrada inválida. |
 | `src/quilha/preparacao.py` | Prepara as 18 features canônicas do Pipeline. |
 | `src/quilha/pipeline.py` | Carrega e valida o artefato serializado. |
@@ -173,6 +175,47 @@ Para validar código e testes:
 uv run ruff check src tests
 uv run pytest -q
 ```
+
+## Uso do app: fila, escolha do sinistro e normalização
+
+O app tem três telas, alimentadas por **um único lote** enviado na barra lateral — a mesma população
+para a fila, para o sinistro individual, para a saúde do modelo e para o drift.
+
+- **Fila do mês.** Pontua o lote, ordena pelo escore e corta em `k` proporcional
+  (`900 × n_sinistros / 12.024`, decisão D4). O corte é capacidade de negócio, não escolha do
+  analista. A fila é exportável em CSV.
+- **Sinistro individual.** O perito **escolhe** qual sinistro detalhar; o app nunca escolhe por ele.
+- **Valor e governança.** Ganho mensal com intervalo de confiança, valor por sinistro, saúde do
+  modelo e gatilhos de circuit breaker.
+
+**Como escolher o sinistro (tela 2), origem "Da fila do mês":**
+
+- **Clique na linha da fila** (tela 1): a seleção viaja para a tela 2 e o seletor já abre naquele
+  sinistro.
+- **Seletor da fila**: lista `#posição · id_sinistro · escore`, com busca por digitação. A posição e
+  o escore conferem com a fila da tela 1 — no lote de demonstração (mês de teste), o topo é
+  `#1 · SIN-26-100637 · escore 0,9561`.
+- **Digitar um chamado**: para o sinistro que ainda não está no lote; o perito preenche os campos do
+  contrato à mão.
+
+**Normalização da representação.** Antes do contrato, toda entrada — o lote e o chamado digitado —
+passa por `quilha.normalizacao.normalizar`, que reescreve apenas a **forma** do valor e **relata**
+cada mudança na tela (expander "Normalização de representação"). No lote de UAT versionado
+`data/raw/lote_teste_uat.csv` (46 linhas):
+
+| Regra | Exemplo | Resultado |
+|---|---|---|
+| B1 · milhar pt-BR | `valor_reclamado = "1.234,56"` | `1234.56` |
+| B2 · caixa/espaço | `uf = " sp "` | `"SP"` |
+| B3 · data `DD/MM/AAAA` | `data_ocorrencia = "15/08/2026"` | `"2026-08-15"` |
+
+O que **não** é representação continua recusado pelo contrato, com linha, campo, valor e motivo (no
+mesmo lote: `idade_segurado = "abc"`, `hora_ocorrencia = "99:99"`,
+`canal_abertura = "Telefone"`). Uma linha inválida recusa o lote inteiro (`fail closed`), em vez de
+produzir uma fila parcial: a linha omitida pode ser exatamente a fraude.
+
+Princípio que separa os dois casos: **representação → normaliza e reporta; significado, ambiguidade
+ou domínio → recusa.** Consulte o [parecer das melhorias](docs/07_melhorias.md) para as evidências.
 
 ## Publicação no GitHub Pages
 

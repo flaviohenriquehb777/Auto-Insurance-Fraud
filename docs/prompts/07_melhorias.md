@@ -3,8 +3,8 @@
 **Projeto:** Detecção de fraude em sinistros de automóvel — Quilha Seguros
 **Escopo:** elevar a POC entregue na Fase 6 a um nível impecável — **sem reabrir o modelo** e
 **sem reintroduzir a falha silenciosa**.
-**Status:** plano aprovado pelo responsável. **Parte A pendente**, uma parte por vez, com
-autorização a cada passo.
+**Status:** plano aprovado pelo responsável e **executado por completo — Partes A, B e C
+concluídas**, uma parte por vez, com autorização a cada passo.
 **Pré-requisito:** Fase 6 concluída — app publicado em `https://quilha-triagem.streamlit.app/`,
 `ruff` e **133 testes** verdes, artefato auditado em `models/pipeline_fraude.joblib`.
 
@@ -211,5 +211,5 @@ próximo passo."**
 | Parte | Descrição | Status |
 |---|---|---|
 | A | O perito escolhe o sinistro (tela 2) | **concluída** — 137 testes, fumaça intacta |
-| B | Normalização determinística com relatório | pendente |
-| C | Encerramento (docs, README, evidência) | pendente |
+| B | Normalização determinística com relatório | **concluída** — 166 testes, fumaça intacta |
+| C | Encerramento (docs, README, evidência) | **concluída** — parecer `docs/07_melhorias.md`, README e este prompt atualizados |
