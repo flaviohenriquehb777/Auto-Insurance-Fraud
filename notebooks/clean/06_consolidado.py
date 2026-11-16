@@ -883,3 +883,18 @@ print()
 print("-" * 78)
 print(f"TEMPO REAL DE EXECUÇÃO: {tempo_total:.2f} s ({int(minutos):02d}:{segundos:05.2f})")
 print("-" * 78)
+
+# %% [markdown]
+# ## 8 · Demonstração interativa — o app publicado
+#
+# O notebook mostra a política **por dentro**; o app publicado mostra a **mesma política em uso**.
+# Ele recebe um lote de sinistros, aplica a **normalização de representação** e o **contrato de
+# dados**, ordena a fila pelo escore e corta em `k`; na tela do sinistro individual, o perito
+# **escolhe** o caso — por id ou pela posição na fila — e vê o escore, a faixa de prioridade e os
+# sinais que explicam a posição. O app **não** decide fraude: ele prioriza e explica, e a decisão
+# de periciar continua humana.
+#
+# ▶ **Abrir o app:** https://quilha-triagem.streamlit.app/
+#
+# Todo o comportamento é reproduzível sem internet: a lógica está em `src/quilha/app.py` e os
+# testes correspondentes em `tests/test_app.py`.

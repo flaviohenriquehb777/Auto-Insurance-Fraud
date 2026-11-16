@@ -9,8 +9,10 @@ bebem do mesmo arquivo, a divergência é impossível por construção.
 As **cinco partes** do resumo correspondem às cinco perguntas do comitê e são
 montadas agrupando as linhas do CSV por pergunta. Cada parte abre com uma
 frase de leitura (sem números: só interpretação) e lista, em marcadores, o
-campo do Quadro e a resposta medida. O **Quadro completo (24 campos)** fecha o
-documento, fora do limite de 2 páginas.
+campo do Quadro e a resposta medida. Antes do Quadro, uma seção curta aponta onde
+a política está **publicada em uso** (o app interativo) — **texto sem nenhum
+número**, para não ferir a regra de ouro. O **Quadro completo (24 campos)** fecha
+o documento, fora do limite de 2 páginas.
 
 Fora do Quadro, o único dado que não vem do CSV é o carimbo de geração
 ("gerado em") — metadado do documento, não métrica do case.
@@ -76,6 +78,21 @@ LEITURAS: dict[int, str] = {
     ),
 }
 
+# ---------------------------------------------------------------------------
+# Demonstração publicada (app) — **texto sem números**, para não ferir a regra
+# de ouro ("todo número do .docx existe impresso no .ipynb").
+# ---------------------------------------------------------------------------
+
+URL_APP = "https://quilha-triagem.streamlit.app/"
+TEXTO_APP = (
+    "Além do notebook, a política está publicada como um app interativo (Streamlit). "
+    "Ele recebe um lote de sinistros, aplica a normalização de representação e o contrato "
+    "de dados, ordena a fila pelo escore e corta em k; na tela do sinistro individual, o "
+    "perito escolhe o caso — por id ou pela posição na fila — e vê o escore, a faixa de "
+    "prioridade e os sinais que explicam a posição. O app não decide fraude: ele prioriza "
+    "e explica, e a decisão de periciar continua humana."
+)
+
 
 def carregar_quadro(caminho: Path = CAMINHO_QUADRO) -> pd.DataFrame:
     """Lê o Quadro de Respostas medido na Fase 5 — a fonte única do documento."""
@@ -136,6 +153,16 @@ def _adicionar_parte(
         paragrafo.add_run(resposta)
 
 
+def _adicionar_app(documento: Documento) -> None:
+    """Aponta, em texto sem números, onde a política está publicada em uso."""
+    documento.add_heading("Demonstração interativa — o app publicado", level=1)
+    documento.add_paragraph(TEXTO_APP)
+    link = documento.add_paragraph()
+    rotulo = link.add_run("▶ Abrir o app: ")
+    rotulo.bold = True
+    link.add_run(URL_APP)
+
+
 def _adicionar_quadro(documento: Documento, quadro: pd.DataFrame) -> None:
     """O Quadro de Respostas completo (24 campos), fora do limite de 2 páginas."""
     documento.add_page_break()
@@ -168,6 +195,7 @@ def montar_documento(
     _adicionar_cabecalho(documento, gerado_em or datetime.now())
     for pergunta, titulo, pares in partes_do_resumo(quadro):
         _adicionar_parte(documento, pergunta, titulo, pares)
+    _adicionar_app(documento)
     _adicionar_quadro(documento, quadro)
     return documento
 
