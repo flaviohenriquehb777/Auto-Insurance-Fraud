@@ -1,0 +1,31 @@
+# Pipeline DVC — Quilha Seguros / detecção de fraude em sinistros de automóvel.
+#
+# O artefato auditado (`models/pipeline_fraude.joblib`) entra como ENTRADA e nunca é
+# regravado: não existe estágio de treino. O pipeline reproduz a divisão temporal e a
+# medição da política da Fase 5, gravando o resultado como métrica versionada.
+#
+# `PYTHONPATH` vem de `dvc.env` (o pacote `quilha` não é instalado no ambiente virtual):
+# é o mesmo contrato do `app.py` da raiz do projeto. Ver `src/quilha/estagios.py`.
+stages:
+  preparo:
+    desc: "Divide a base crua em treino (abr-jul) e teste (ago) pelo corte temporal."
+    cmd: uv run --env-file dvc.env python -m quilha.estagios preparo
+    deps:
+      - data/raw/quilha_sinistros.csv
+      - src/quilha/dados.py
+    outs:
+      - data/processed/treino.csv
+      - data/processed/teste.csv
+
+  avaliacao:
+    desc: "Mede a política do campeão congelado contra a regra de R$ 50 mil no mês de teste."
+    cmd: uv run --env-file dvc.env python -m quilha.estagios avaliacao
+    deps:
+      - data/processed/treino.csv
+      - data/processed/teste.csv
+      - models/pipeline_fraude.joblib
+      - src/quilha/avaliacao.py
+      - src/quilha/estagios.py
+    metrics:
+      - reports/metricas/avaliacao.json:
+          cache: false

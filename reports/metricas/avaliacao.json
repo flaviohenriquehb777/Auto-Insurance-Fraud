@@ -1,0 +1,13 @@
+{
+  "k_pericias": 900,
+  "n_teste": 11904,
+  "n_fraudes_teste": 281,
+  "tp_campeao": 201,
+  "fp_campeao": 699,
+  "fn_campeao": 80,
+  "precisao_campeao": 0.2233,
+  "cobertura_campeao": 0.7153,
+  "resultado_campeao": 3731700.0,
+  "resultado_regra_atual": -326200.0,
+  "ganho_campeao_sobre_regra_atual": 4057900.0
+}

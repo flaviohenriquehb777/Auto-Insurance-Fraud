@@ -32,6 +32,7 @@
 - [Resultados-chave e apresentação](#resultados-chave-e-apresentacao)
 - [Tecnologias utilizadas](#tecnologias-utilizadas)
 - [Instalação e uso](#instalacao-e-uso)
+- [Pipeline reproduzível com DVC](#pipeline-reproduzivel-com-dvc)
 - [Uso do app: fila, escolha do sinistro e normalização](#uso-do-app-fila-escolha-do-sinistro-e-normalizacao)
 - [Publicação no GitHub Pages](#publicacao-no-github-pages)
 - [Licença](#licenca)
@@ -74,6 +75,7 @@ Payload CSV → normalização da representação → contrato de dados → prep
 | `src/quilha/app.py` | Fila, análise individual, valor e governança no Streamlit. |
 | `src/quilha/avaliacao.py` | Políticas, métricas econômicas, backtest e Quadro de Respostas. |
 | `src/quilha/relatorio.py` | Gera o resumo executivo DOCX usando o CSV auditado como fonte única. |
+| `src/quilha/estagios.py` | Estágios do pipeline DVC (`preparo`, `avaliacao`) executados por `dvc repro`. |
 | `notebooks/clean/06_consolidado.py` | Fonte Jupytext do notebook consolidado das Fases 1 a 6. |
 | `tests/` | Testes de contrato, aplicação, avaliação e geração de relatório. |
 | `docs/` | Pareceres, método, decisões e documentação das fases. |
@@ -141,6 +143,7 @@ artefatos locais ignorados pelo Git; eles não aparecem como arquivos baixáveis
 | Dados e modelagem | pandas, NumPy, scikit-learn, XGBoost, LightGBM |
 | Explicabilidade e interface | SHAP, Streamlit |
 | Experimentação e análise | MLflow, Jupyter, Jupytext |
+| Versionamento de dados e pipeline | DVC |
 | Relatórios e qualidade | python-docx, pytest, Ruff, GitHub Actions |
 
 ## Instalação e uso
@@ -175,6 +178,68 @@ Para validar código e testes:
 uv run ruff check src tests
 uv run pytest -q
 ```
+
+## Pipeline reproduzível com DVC
+
+O repositório versiona o **pipeline de dados** com [DVC](https://dvc.org/). O `dvc repro`
+recalcula, a partir da base crua, a divisão temporal e a medição da política que a Fase 5
+afirmou — de modo que os números centrais do estudo deixam de ser "digitados" e passam a ser
+reproduzíveis por qualquer pessoa que clone o repositório.
+
+O grafo tem dois estágios:
+
+```text
+preparo:    data/raw/quilha_sinistros.csv
+            ─► data/processed/treino.csv  +  data/processed/teste.csv
+
+avaliacao:  data/processed/treino.csv  +  data/processed/teste.csv
+            + models/pipeline_fraude.joblib
+            ─► reports/metricas/avaliacao.json
+```
+
+| Estágio | O que faz | Saídas |
+|---|---|---|
+| `preparo` | Divide a base crua pelo corte temporal (abr–jul treino / ago teste), sem reescrever a regra de corte. | `data/processed/treino.csv`, `data/processed/teste.csv` |
+| `avaliacao` | Mede a política do campeão congelado contra a regra atual de R$ 50 mil, sob o critério `21.700 × TP − 700 × k`. | `reports/metricas/avaliacao.json` (métrica) |
+
+Duas decisões de desenho:
+
+- **O modelo auditado é entrada, não saída.** `models/pipeline_fraude.joblib` entra como `dep` e
+  nunca é regravado — não existe estágio de treino. Isso protege o artefato aprovado e mantém a
+  cadeia focada em *reproduzir a medição*, não em re-treinar.
+- **A base crua permanece no Git.** `data/raw/quilha_sinistros.csv` é dependência (o app e o
+  `pytest` a leem) e não um `out`. Só os derivados entram no DVC; por isso o app publicado e o CI
+  funcionam sem depender do remote.
+
+### Como reproduzir
+
+O `PYTHONPATH` de que o pacote `quilha` precisa é declarado em `dvc.env` (versionado de propósito)
+e carregado por `uv run --env-file dvc.env` — o mesmo contrato do `app.py` da raiz.
+
+```powershell
+uv sync --all-groups        # instala o grupo mlops (dvc, mlflow)
+
+# O remote local já vem declarado em .dvc/config (versionado) e aponta para a pasta
+# irmã ../quilha-dvc-store, que é criada no primeiro `dvc push` — sem custo de nuvem.
+dvc repro                   # reproduz o pipeline; no-op se nada mudou
+dvc metrics show            # exibe reports/metricas/avaliacao.json
+dvc push                    # envia as saídas ao remote local
+```
+
+O `dvc.lock` guarda o hash de cada entrada e saída da última execução: se um `dep` muda, o DVC
+refaz só o que for afetado; se nada mudou, cada estágio é ignorado. Em ambiente novo, `dvc pull`
+restaura as saídas a partir do remote.
+
+**Medição reproduzida** (`reports/metricas/avaliacao.json`) — são os mesmos valores da Fase 5:
+
+| Métrica | Valor |
+|---|---:|
+| Sinistros no mês de teste | 11.904 |
+| Fraudes no mês de teste | 281 |
+| Verdadeiros positivos em 900 perícias | 201 |
+| Resultado da política do campeão | R$ 3.731.700,00 |
+| Resultado da regra atual | −R$ 326.200,00 |
+| Ganho do campeão sobre a regra atual | R$ 4.057.900,00 |
 
 ## Uso do app: fila, escolha do sinistro e normalização
 

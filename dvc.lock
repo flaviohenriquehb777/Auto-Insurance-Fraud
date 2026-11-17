@@ -1,0 +1,50 @@
+schema: '2.0'
+stages:
+  preparo:
+    cmd: uv run --env-file dvc.env python -m quilha.estagios preparo
+    deps:
+    - path: data/raw/quilha_sinistros.csv
+      hash: md5
+      md5: 14671e2719497590a21717317a058e23
+      size: 6892875
+    - path: src/quilha/dados.py
+      hash: md5
+      md5: 10e9b736625bfc2abe44e1d560a7fc1c
+      size: 3613
+    outs:
+    - path: data/processed/teste.csv
+      hash: md5
+      md5: 529736df37f53a076f3b53048caf6013
+      size: 1367513
+    - path: data/processed/treino.csv
+      hash: md5
+      md5: 8b091c58aa583e6efb9e4543a469404c
+      size: 5525604
+  avaliacao:
+    cmd: uv run --env-file dvc.env python -m quilha.estagios avaliacao
+    deps:
+    - path: data/processed/teste.csv
+      hash: md5
+      md5: 529736df37f53a076f3b53048caf6013
+      size: 1367513
+    - path: data/processed/treino.csv
+      hash: md5
+      md5: 8b091c58aa583e6efb9e4543a469404c
+      size: 5525604
+    - path: models/pipeline_fraude.joblib
+      hash: md5
+      md5: b996f818df961f83f1977273752a48db
+      size: 449791
+    - path: src/quilha/avaliacao.py
+      hash: md5
+      md5: b741fc29fd5c55799eff2616a9a84c66
+      size: 46477
+    - path: src/quilha/estagios.py
+      hash: md5
+      md5: 7299d69b3797b015e7f5c66c561b3456
+      size: 6172
+    outs:
+    - path: reports/metricas/avaliacao.json
+      hash: md5
+      md5: 861e41da6f01e2340ab757d649ceea52
+      size: 326
