@@ -24,18 +24,18 @@
 
 ## Sumário
 
-- [Visão geral do modelo](#visao-geral-do-modelo)
-- [Objetivos da análise](#objetivos-da-analise)
-- [Estrutura do modelo e do repositório](#estrutura-do-modelo-e-do-repositorio)
+- [Visão geral do modelo](#visão-geral-do-modelo)
+- [Objetivos da análise](#objetivos-da-análise)
+- [Estrutura do modelo e do repositório](#estrutura-do-modelo-e-do-repositório)
 - [Base de dados](#base-de-dados)
-- [Metodologia de análise: CRISP-DM](#metodologia-de-analise-crisp-dm)
-- [Resultados-chave e apresentação](#resultados-chave-e-apresentacao)
+- [Metodologia de análise: CRISP-DM](#metodologia-de-análise-crisp-dm)
+- [Resultados-chave e apresentação](#resultados-chave-e-apresentação)
 - [Tecnologias utilizadas](#tecnologias-utilizadas)
-- [Instalação e uso](#instalacao-e-uso)
-- [Pipeline reproduzível com DVC](#pipeline-reproduzivel-com-dvc)
-- [Uso do app: fila, escolha do sinistro e normalização](#uso-do-app-fila-escolha-do-sinistro-e-normalizacao)
-- [Publicação no GitHub Pages](#publicacao-no-github-pages)
-- [Licença](#licenca)
+- [Instalação e uso](#instalação-e-uso)
+- [Pipeline reproduzível com DVC](#pipeline-reproduzível-com-dvc)
+- [Uso do app: fila, escolha do sinistro e normalização](#uso-do-app-fila-escolha-do-sinistro-e-normalização)
+- [Publicação no GitHub Pages](#publicação-no-github-pages)
+- [Licença](#licença)
 - [Contato](#contato)
 
 ## Visão geral do modelo
@@ -66,6 +66,8 @@ Payload CSV → normalização da representação → contrato de dados → prep
             → ordenação por escore → corte proporcional em k → fila para revisão humana
 ```
 
+<div align="center">
+
 | Caminho | Responsabilidade |
 |---|---|
 | `src/quilha/normalizacao.py` | Reescreve a **representação** (milhar pt-BR, caixa/espaço, data `dd/mm/aaaa`) e **relata** cada mudança. Só representação; significado e domínio seguem para o contrato. |
@@ -79,6 +81,8 @@ Payload CSV → normalização da representação → contrato de dados → prep
 | `notebooks/clean/06_consolidado.py` | Fonte Jupytext do notebook consolidado das Fases 1 a 6. |
 | `tests/` | Testes de contrato, aplicação, avaliação e geração de relatório. |
 | `docs/` | Pareceres, método, decisões e documentação das fases. |
+
+</div>
 
 ## Base de dados
 
@@ -96,6 +100,8 @@ dados autorizados; não envie dados pessoais ou operacionais a uma demonstraçã
 
 ## Metodologia de análise: CRISP-DM
 
+<div align="center">
+
 | Fase | Trabalho realizado | Documentação |
 |---|---|---|
 | 1. Entendimento do negócio | Objetivo econômico, capacidade de 900 perícias e critérios de sucesso. | [Fase 1](docs/01_entendimento_negocio.md) |
@@ -105,10 +111,14 @@ dados autorizados; não envie dados pessoais ou operacionais a uma demonstraçã
 | 5. Avaliação | Política econômica, robustez, incerteza e governança. | [Fase 5](docs/05_avaliacao.md) |
 | 6. Implantação | Artefato, contrato de entrada, app, monitoramento e entregáveis. | [Fase 6](docs/06_implantacao.md) |
 
+</div>
+
 ## Resultados-chave e apresentação
 
 Os valores abaixo são resultados medidos no holdout de agosto de 2026, sob as premissas do estudo
 de caso. Não são uma promessa de resultado futuro.
+
+<div align="center">
 
 | Indicador | Resultado |
 |---|---:|
@@ -120,6 +130,8 @@ de caso. Não são uma promessa de resultado futuro.
 | Resultado líquido da regra atual, com 900 perícias | −R$ 326.200,00 no mês de teste |
 | Ganho da política sobre a regra atual | R$ 4.057.900,00; IC 95% bootstrap: R$ 3.537.100,00 a R$ 4.665.500,00 |
 
+</div>
+
 O modelo foi selecionado por resultado líquido sob capacidade, não por acurácia. A conclusão depende
 das premissas do case (inclusive que a perícia encontra uma fraude quando ela existe) e deve ser
 reavaliada com dados operacionais antes de qualquer uso real. Consulte [Avaliação](docs/05_avaliacao.md)
@@ -128,7 +140,7 @@ e o [parecer da Fase 6](docs/06_implantacao.md) para método, ressalvas e decis�
 ### Entregáveis reproduzíveis
 
 - **Notebook consolidado:** a fonte versionada é `notebooks/clean/06_consolidado.py`; o `.ipynb`
-  executado é gerado localmente pelo comando da seção [Instalação e uso](#instalacao-e-uso).
+  executado é gerado localmente pelo comando da seção [Instalação e uso](#instalação-e-uso).
 - **Resumo executivo:** gerado por `src/quilha/relatorio.py` a partir de
   `reports/tabelas/avaliacao_quadro_respostas.csv`.
 
@@ -136,6 +148,8 @@ Por configuração do repositório, `06_consolidado.ipynb` e `Relatorio_Quilha_F
 artefatos locais ignorados pelo Git; eles não aparecem como arquivos baixáveis neste repositório.
 
 ## Tecnologias utilizadas
+
+<div align="center">
 
 | Área | Ferramentas |
 |---|---|
@@ -145,6 +159,8 @@ artefatos locais ignorados pelo Git; eles não aparecem como arquivos baixáveis
 | Experimentação e análise | MLflow, Jupyter, Jupytext |
 | Versionamento de dados e pipeline | DVC |
 | Relatórios e qualidade | python-docx, pytest, Ruff, GitHub Actions |
+
+</div>
 
 ## Instalação e uso
 
@@ -197,10 +213,14 @@ avaliacao:  data/processed/treino.csv  +  data/processed/teste.csv
             ─► reports/metricas/avaliacao.json
 ```
 
+<div align="center">
+
 | Estágio | O que faz | Saídas |
 |---|---|---|
 | `preparo` | Divide a base crua pelo corte temporal (abr–jul treino / ago teste), sem reescrever a regra de corte. | `data/processed/treino.csv`, `data/processed/teste.csv` |
 | `avaliacao` | Mede a política do campeão congelado contra a regra atual de R$ 50 mil, sob o critério `21.700 × TP − 700 × k`. | `reports/metricas/avaliacao.json` (métrica) |
+
+</div>
 
 Duas decisões de desenho:
 
@@ -232,6 +252,8 @@ restaura as saídas a partir do remote.
 
 **Medição reproduzida** (`reports/metricas/avaliacao.json`) — são os mesmos valores da Fase 5:
 
+<div align="center">
+
 | Métrica | Valor |
 |---|---:|
 | Sinistros no mês de teste | 11.904 |
@@ -240,6 +262,8 @@ restaura as saídas a partir do remote.
 | Resultado da política do campeão | R$ 3.731.700,00 |
 | Resultado da regra atual | −R$ 326.200,00 |
 | Ganho do campeão sobre a regra atual | R$ 4.057.900,00 |
+
+</div>
 
 ## Uso do app: fila, escolha do sinistro e normalização
 
@@ -268,11 +292,15 @@ passa por `quilha.normalizacao.normalizar`, que reescreve apenas a **forma** do 
 cada mudança na tela (expander "Normalização de representação"). No lote de UAT versionado
 `data/raw/lote_teste_uat.csv` (46 linhas):
 
+<div align="center">
+
 | Regra | Exemplo | Resultado |
 |---|---|---|
 | B1 · milhar pt-BR | `valor_reclamado = "1.234,56"` | `1234.56` |
 | B2 · caixa/espaço | `uf = " sp "` | `"SP"` |
 | B3 · data `DD/MM/AAAA` | `data_ocorrencia = "15/08/2026"` | `"2026-08-15"` |
+
+</div>
 
 O que **não** é representação continua recusado pelo contrato, com linha, campo, valor e motivo (no
 mesmo lote: `idade_segurado = "abc"`, `hora_ocorrencia = "99:99"`,
