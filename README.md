@@ -294,7 +294,7 @@ A demonstração interativa está publicada em:
 > **[quilha-triagem.streamlit.app](https://quilha-triagem.streamlit.app/)**
 
 A captura no topo deste README é clicável e leva direto ao app. O deploy é feito a partir da
-branch `feature/fase-6-implantacao`, com Python 3.12 e dependências resolvidas pelo `uv.lock`.
+branch `main`, com Python 3.12 e dependências resolvidas pelo `uv.lock`.
 
 ## Licença
 

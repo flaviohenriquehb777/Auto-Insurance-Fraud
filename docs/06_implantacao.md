@@ -363,21 +363,20 @@ valor e governança, com os separadores monetários corrigidos para pt-BR.
 
 A documentação e as verificações locais estão concluídas, e **o app foi publicado e
 validado** no Streamlit Community Cloud. O aceite visual (UAT) foi realizado em
-13/11/2026 — veja registro abaixo. Os merges na `main` e a configuração do GitHub
-Pages foram as etapas finais pendentes; veja o andamento na seção de Progresso.
+13/11/2026 — veja registro abaixo. Os merges dos PRs #2 e #3 na `main` foram concluídos; a
+configuração do GitHub Pages segue como etapa final pendente.
 
-Consulta aos PRs em aberto (13/11/2026): [PR #2](https://github.com/flaviohenriquehb777/Auto-Insurance-Fraud/pull/2)
-está aberto e mergeável de `feature/fase-5-avaliacao` para `main`; [PR #3](https://github.com/flaviohenriquehb777/Auto-Insurance-Fraud/pull/3)
-está aberto e mergeável de `feature/fase-6-implantacao` para `feature/fase-5-avaliacao`. Como o
-segundo está empilhado sobre o primeiro, a sequência profissional é integrar a Fase 5 primeiro e,
-depois, atualizar o destino do PR da Fase 6 para `main`, validar CI e só então considerar o merge.
-Nenhuma dessas alterações remotas foi feita nesta etapa.
+Consulta aos PRs (13/11/2026) — registro histórico: o [PR #2](https://github.com/flaviohenriquehb777/Auto-Insurance-Fraud/pull/2)
+(`feature/fase-5-avaliacao` → `main`) e o [PR #3](https://github.com/flaviohenriquehb777/Auto-Insurance-Fraud/pull/3)
+(`feature/fase-6-implantacao` → `feature/fase-5-avaliacao`) estavam abertos e mergeáveis, na ordem
+profissional de integração (Fase 5 primeiro). Ambos foram posteriormente mergeados na `main`.
 
 ### Publicação no Streamlit Community Cloud · CONCLUÍDA (13/11/2026)
 
-O app foi publicado e validado no Streamlit Community Cloud a partir da branch
-`feature/fase-6-implantacao`, sem merge na `main` (conforme combinado: publicar antes do aceite
-visual final).
+O app foi publicado e validado no Streamlit Community Cloud, inicialmente a partir da branch
+`feature/fase-6-implantacao` (conforme combinado: publicar antes do aceite visual final). Após o
+merge dos PRs #2 e #3 na `main`, o deploy passou a ser servido da `main` — branch que recebe todo o
+trabalho subsequente.
 
 **Configuração do deploy:**
 
